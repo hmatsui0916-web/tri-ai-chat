@@ -145,6 +145,41 @@ type ResolvedFlowStepV14 = FlowStepV14 & {
   template_unresolved?: boolean;
 };
 
+type ControlCause = "implementation" | "specification" | "environment";
+
+type ControlReviewDecision = {
+  verified: boolean;
+  cause?: ControlCause;
+  reason?: string;
+};
+
+type ControlRuntimeResolution =
+  | {
+      kind: "verified";
+      state_from?: string;
+      state_to?: string;
+      route_context_reset?: string;
+      nextStepId?: string;
+      unresolvedReason?: undefined;
+    }
+  | {
+      kind: "feedback_branch";
+      branchKey: ControlCause;
+      route_context?: string;
+      state_rollback_to?: string;
+      firstStepId?: string;
+      firstStep?: ResolvedFlowStepV14;
+      unresolvedReason?: undefined;
+    }
+  | {
+      kind: "unresolved";
+      unresolvedReason: string;
+    }
+  | {
+      kind: "not_applicable";
+      unresolvedReason?: undefined;
+    };
+
 const DEFAULT_PAGE_SIZE = 4;
 const MAX_COLUMNS = 10;
 const MIN_COLUMNS = 1;
@@ -456,6 +491,88 @@ function isSpecialFlowRef(nextId: string): boolean {
   );
 }
 
+function hasControlReviewSpecialRefs(routingResult: RoutingResolutionResult): boolean {
+  return routingResult.specialRefs.some(
+    (ref) => ref === "feedback_flow.branches" || ref === "feedback_flow.verified_transition"
+  );
+}
+
+function resolveVerifiedTransition(flow: FlowDefinitionV14): ControlRuntimeResolution {
+  const transition = flow.feedback_flow?.verified_transition;
+  if (!isPlainObject(transition)) {
+    return { kind: "unresolved", unresolvedReason: "verified_transition が未定義またはオブジェクトではありません。" };
+  }
+
+  const nextStepId = typeof transition.next_step === "string" ? transition.next_step : undefined;
+  const state_from = typeof transition.state_from === "string" ? transition.state_from : undefined;
+  const state_to = typeof transition.state_to === "string" ? transition.state_to : undefined;
+  const route_context_reset = typeof transition.route_context_reset === "string" ? transition.route_context_reset : undefined;
+
+  if (!nextStepId) {
+    return { kind: "unresolved", unresolvedReason: "verified_transition に next_step がありません。" };
+  }
+
+  return {
+    kind: "verified",
+    nextStepId,
+    state_from,
+    state_to,
+    route_context_reset,
+  };
+}
+
+function resolveFeedbackBranch(
+  flow: FlowDefinitionV14,
+  cause: ControlCause
+): ControlRuntimeResolution {
+  const branch = flow.feedback_flow?.branches?.[cause];
+  if (!isPlainObject(branch)) {
+    return { kind: "unresolved", unresolvedReason: `feedback_flow.branches.${cause} が未定義です。` };
+  }
+
+  const resolvedFlow = getResolvedFeedbackBranchFlow(flow, cause);
+  const firstStep = resolvedFlow.find((step) => !step.template_unresolved);
+  if (!firstStep) {
+    return {
+      kind: "unresolved",
+      unresolvedReason: `feedback_flow.branches.${cause} に有効な先頭stepがありません。`,
+    };
+  }
+
+  return {
+    kind: "feedback_branch",
+    branchKey: cause,
+    route_context: typeof branch.route_context === "string" ? branch.route_context : undefined,
+    state_rollback_to: typeof branch.state_rollback_to === "string" ? branch.state_rollback_to : undefined,
+    firstStepId: firstStep.id,
+    firstStep,
+  };
+}
+
+function resolveControlReviewRuntime(
+  flow: FlowDefinitionV14,
+  routingResult: RoutingResolutionResult,
+  decision: ControlReviewDecision
+): ControlRuntimeResolution {
+  if (!hasControlReviewSpecialRefs(routingResult)) {
+    return { kind: "not_applicable" };
+  }
+
+  if (decision.verified === true) {
+    return resolveVerifiedTransition(flow);
+  }
+
+  if (!decision.cause) {
+    return { kind: "unresolved", unresolvedReason: "cause が指定されていません。" };
+  }
+
+  if (decision.cause === "implementation" || decision.cause === "specification" || decision.cause === "environment") {
+    return resolveFeedbackBranch(flow, decision.cause);
+  }
+
+  return { kind: "unresolved", unresolvedReason: `不正な cause: ${decision.cause}` };
+}
+
 function resolveStepsByIds(
   flow: FlowDefinitionV14,
   nextIds: string[]
@@ -603,6 +720,8 @@ export default function Home() {
   );
   const [routingState, setRoutingState] = useState("Draft");
   const [routingRouteContext, setRoutingRouteContext] = useState("main");
+  const [controlVerified, setControlVerified] = useState(false);
+  const [controlCause, setControlCause] = useState<ControlCause>("implementation");
   const abortRef = useRef<AbortController | null>(null);
 
   const columnIds = useMemo(() => columns.map((column) => column.id), [columns]);
@@ -651,6 +770,14 @@ export default function Home() {
     if (!isFlowV14(selectedFlow)) return null;
     return resolveRouting(selectedFlow, routingState, routingRouteContext);
   }, [selectedFlow, routingState, routingRouteContext]);
+
+  const controlReviewResolution = useMemo(() => {
+    if (!isFlowV14(selectedFlow) || !routingResolution) return null;
+    return resolveControlReviewRuntime(selectedFlow, routingResolution, {
+      verified: controlVerified,
+      cause: controlVerified ? undefined : controlCause,
+    });
+  }, [selectedFlow, routingResolution, controlVerified, controlCause]);
 
   useEffect(() => {
     if (!routingEntries.length) return;
@@ -1553,6 +1680,68 @@ export default function Home() {
                     ) : (
                       <div style={{ marginLeft: "10px", fontSize: "0.9em" }}>state_routing が未定義または空です。</div>
                     )}
+                  </div>
+                )}
+
+                {selectedFlow && isFlowV14(selectedFlow) && routingResolution && (
+                  <div style={{ marginTop: "12px", paddingTop: "12px", borderTop: "1px solid #ddd" }}>
+                    <div style={{ fontSize: "0.95em", fontWeight: "500", marginBottom: "6px" }}>ControlReview Runtime</div>
+                    <div style={{ display: "grid", gap: "10px", marginLeft: "10px" }}>
+                      <div style={{ display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
+                        <label style={{ fontSize: "0.9em" }}>
+                          <input type="checkbox" checked={controlVerified} onChange={(e) => setControlVerified(e.target.checked)} />
+                          verified
+                        </label>
+                        <label style={{ fontSize: "0.9em" }}>
+                          cause
+                          <select
+                            value={controlCause}
+                            onChange={(e) => setControlCause(e.target.value as ControlCause)}
+                            disabled={controlVerified}
+                            style={{ marginLeft: "6px" }}
+                          >
+                            <option value="implementation">implementation</option>
+                            <option value="specification">specification</option>
+                            <option value="environment">environment</option>
+                          </select>
+                        </label>
+                      </div>
+
+                      {controlReviewResolution ? (
+                        <div style={{ lineHeight: 1.6 }}>
+                          <div>kind: {controlReviewResolution.kind}</div>
+                          {controlReviewResolution.kind === "verified" && (
+                            <>
+                              <div>nextStepId: {controlReviewResolution.nextStepId || "(none)"}</div>
+                              <div>state_from: {controlReviewResolution.state_from || "(none)"}</div>
+                              <div>state_to: {controlReviewResolution.state_to || "(none)"}</div>
+                              <div>route_context_reset: {controlReviewResolution.route_context_reset || "(none)"}</div>
+                            </>
+                          )}
+                          {controlReviewResolution.kind === "feedback_branch" && (
+                            <>
+                              <div>branchKey: {controlReviewResolution.branchKey}</div>
+                              <div>route_context: {controlReviewResolution.route_context || "(none)"}</div>
+                              <div>state_rollback_to: {controlReviewResolution.state_rollback_to || "(none)"}</div>
+                              <div>firstStepId: {controlReviewResolution.firstStepId || "(none)"}</div>
+                              {controlReviewResolution.firstStep && (
+                                <div style={{ marginLeft: "10px" }}>
+                                  firstStep: {controlReviewResolution.firstStep.id} / {controlReviewResolution.firstStep.name || controlReviewResolution.firstStep.type || controlReviewResolution.firstStep.route_context || "(no label)"}
+                                </div>
+                              )}
+                            </>
+                          )}
+                          {controlReviewResolution.kind === "unresolved" && (
+                            <div style={{ color: "#b33" }}>unresolved: {controlReviewResolution.unresolvedReason}</div>
+                          )}
+                          {controlReviewResolution.kind === "not_applicable" && (
+                            <div>not applicable: ControlReview specialRefs が含まれていません。</div>
+                          )}
+                        </div>
+                      ) : (
+                        <div style={{ marginLeft: "10px" }}>ControlReview preview unavailable</div>
+                      )}
+                    </div>
                   </div>
                 )}
               </div>
