@@ -158,6 +158,18 @@ type FlowRuntimeState = {
   routeContext: string;
 };
 
+type ParallelTaskStatus = {
+  id: string;
+  target: string;
+  completed: boolean;
+};
+
+type ParallelRuntimeState = {
+  stepId: string;
+  joinMode: string;
+  tasks: ParallelTaskStatus[];
+};
+
 const DEFAULT_FLOW_RUNTIME_STATE: FlowRuntimeState = {
   state: "Draft",
   routeContext: "main",
@@ -368,6 +380,49 @@ function getNextRuntimeState(
   return {
     state: step.state_to || current.state,
     routeContext: step.route_context || current.routeContext,
+  };
+}
+
+function isParallelStep(step: ResolvedFlowStepV14): boolean {
+  return step.type === "parallel";
+}
+
+function getParallelTargets(step: ResolvedFlowStepV14): string[] {
+  if (Array.isArray(step.to)) {
+    return step.to.map((target) => String(target)).filter(Boolean);
+  }
+  if (typeof step.to === "string") {
+    return [step.to];
+  }
+  return [];
+}
+
+function createParallelRuntimeState(step: ResolvedFlowStepV14): ParallelRuntimeState {
+  const targets = getParallelTargets(step);
+  return {
+    stepId: step.id,
+    joinMode: step.join || "unsupported",
+    tasks: targets.map((target, index) => ({ id: `${step.id}-task-${index + 1}`, target, completed: false })),
+  };
+}
+
+function isParallelComplete(parallelState: ParallelRuntimeState): boolean {
+  if (parallelState.joinMode === "all_complete") {
+    return parallelState.tasks.every((task) => task.completed);
+  }
+  return false;
+}
+
+function updateParallelTaskStatus(
+  parallelState: ParallelRuntimeState,
+  taskId: string,
+  completed: boolean
+): ParallelRuntimeState {
+  return {
+    ...parallelState,
+    tasks: parallelState.tasks.map((task) =>
+      task.id === taskId ? { ...task, completed } : task
+    ),
   };
 }
 
@@ -764,6 +819,7 @@ export default function Home() {
   const [routingState, setRoutingState] = useState("Draft");
   const [routingRouteContext, setRoutingRouteContext] = useState("main");
   const [flowRuntimeState, setFlowRuntimeState] = useState<FlowRuntimeState>(DEFAULT_FLOW_RUNTIME_STATE);
+  const [parallelRuntimeState, setParallelRuntimeState] = useState<ParallelRuntimeState | null>(null);
   const [controlVerified, setControlVerified] = useState(false);
   const [controlCause, setControlCause] = useState<ControlCause>("implementation");
   const abortRef = useRef<AbortController | null>(null);
@@ -829,6 +885,21 @@ export default function Home() {
     return runtimeRouting?.steps ?? [];
   }, [selectedFlow, flowRuntimeState]);
 
+  const activeParallelStep = useMemo(() => {
+    return flowRuntimeNextSteps.find(isParallelStep);
+  }, [flowRuntimeNextSteps]);
+
+  useEffect(() => {
+    if (!activeParallelStep) {
+      setParallelRuntimeState(null);
+      return;
+    }
+
+    setParallelRuntimeState((current) =>
+      current?.stepId === activeParallelStep.id ? current : createParallelRuntimeState(activeParallelStep)
+    );
+  }, [activeParallelStep]);
+
   const applyResolvedStep = (
     step: ResolvedFlowStepV14,
     options?: { stateOverride?: string; routeContextOverride?: string }
@@ -837,6 +908,22 @@ export default function Home() {
       state: options?.stateOverride ?? step.state_to ?? current.state,
       routeContext: options?.routeContextOverride ?? step.route_context ?? current.routeContext,
     }));
+  };
+
+  const updateParallelTask = (taskId: string, completed: boolean) => {
+    setParallelRuntimeState((current) =>
+      current ? updateParallelTaskStatus(current, taskId, completed) : current
+    );
+  };
+
+  const isParallelReadyToAdvance = parallelRuntimeState ? isParallelComplete(parallelRuntimeState) : false;
+
+  const applyParallelStep = () => {
+    if (!activeParallelStep || !parallelRuntimeState) return;
+    if (!isParallelReadyToAdvance) return;
+
+    applyResolvedStep(activeParallelStep);
+    setParallelRuntimeState(null);
   };
 
   const applyControlReviewResolution = (resolution: ControlRuntimeResolution) => {
@@ -883,6 +970,7 @@ export default function Home() {
 
   useEffect(() => {
     setFlowRuntimeState(DEFAULT_FLOW_RUNTIME_STATE);
+    setParallelRuntimeState(null);
   }, [selectedFlowId]);
 
   useEffect(() => {
@@ -1848,7 +1936,46 @@ export default function Home() {
                       <div>Current route_context: {flowRuntimeState.routeContext}</div>
                       <div>Next steps: {flowRuntimeNextSteps.length ? flowRuntimeNextSteps.length : "(none)"}</div>
 
-                      {flowRuntimeNextSteps.map((step) => (
+                      {activeParallelStep && parallelRuntimeState ? (
+                        <div style={{ border: "1px solid #ddf", borderRadius: "6px", padding: "12px", background: "#f8fbff" }}>
+                          <div style={{ fontWeight: 700, marginBottom: "6px" }}>Parallel Step: {getStepDisplayName(activeParallelStep)}</div>
+                          <div style={{ fontSize: "0.95em", color: "#444", marginBottom: "6px" }}>
+                            {activeParallelStep.type || "parallel"} / state_to: {activeParallelStep.state_to || "(none)"} / route_context: {activeParallelStep.route_context || "(none)"}
+                          </div>
+                          <div style={{ marginBottom: "8px" }}>Join mode: {parallelRuntimeState.joinMode}</div>
+                          <div style={{ display: "grid", gap: "8px", marginBottom: "10px" }}>
+                            {parallelRuntimeState.tasks.length ? (
+                              parallelRuntimeState.tasks.map((task) => (
+                                <label key={task.id} style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                                  <input
+                                    type="checkbox"
+                                    checked={task.completed}
+                                    onChange={(e) => updateParallelTask(task.id, e.target.checked)}
+                                  />
+                                  <span>{task.target}</span>
+                                </label>
+                              ))
+                            ) : (
+                              <div style={{ color: "#b33" }}>No parallel targets found.</div>
+                            )}
+                          </div>
+                          {parallelRuntimeState.joinMode === "all_complete" ? (
+                            <button
+                              type="button"
+                              onClick={applyParallelStep}
+                              disabled={!isParallelReadyToAdvance}
+                            >
+                              join完了して進む
+                            </button>
+                          ) : (
+                            <div style={{ color: "#b33" }}>
+                              Unsupported join mode: {parallelRuntimeState.joinMode}. This parallel step cannot advance automatically.
+                            </div>
+                          )}
+                        </div>
+                      ) : null}
+
+                      {flowRuntimeNextSteps.filter((step) => !isParallelStep(step)).map((step) => (
                         <div key={step.id} style={{ border: "1px solid #ddd", borderRadius: "6px", padding: "8px" }}>
                           <div style={{ fontWeight: 600 }}>{getStepDisplayName(step)}</div>
                           <div style={{ fontSize: "0.9em", color: "#555" }}>
