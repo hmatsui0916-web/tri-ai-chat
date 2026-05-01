@@ -390,6 +390,120 @@ function getResolvedFeedbackBranchFlow(
   return resolveTemplateSteps(branch.flow, flow.templates);
 }
 
+type StateRoutingEntry = {
+  state: string;
+  route_context: string;
+  next: string[];
+};
+
+type RoutingResolutionResult = {
+  state: string;
+  route_context: string;
+  nextIds: string[];
+  steps: ResolvedFlowStepV14[];
+  specialRefs: string[];
+  unresolvedNextIds: string[];
+};
+
+function getStateRoutingEntries(flow: FlowDefinitionV14): StateRoutingEntry[] {
+  const raw = flow.orchestration?.state_routing;
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+
+  return raw.reduce<StateRoutingEntry[]>((acc, entry) => {
+    if (!isPlainObject(entry)) return acc;
+    const state = entry.state;
+    const route_context = entry.route_context;
+    const next = entry.next;
+    if (typeof state !== "string" || typeof route_context !== "string" || !Array.isArray(next)) {
+      return acc;
+    }
+
+    const nextIds = next.filter((item): item is string => typeof item === "string");
+    if (!nextIds.length) return acc;
+
+    acc.push({ state, route_context, next: nextIds });
+    return acc;
+  }, []);
+}
+
+function resolveNextIdsByState(
+  flow: FlowDefinitionV14,
+  state: string,
+  routeContext: string
+): string[] {
+  const entries = getStateRoutingEntries(flow);
+  const match = entries.find(
+    (entry) => entry.state === state && entry.route_context === routeContext
+  );
+  return match ? [...match.next] : [];
+}
+
+function getAllResolvedFlowSteps(flow: FlowDefinitionV14): ResolvedFlowStepV14[] {
+  const main = getResolvedMainFlow(flow);
+  const branchSteps = Object.keys(flow.feedback_flow?.branches ?? {}).flatMap((branchKey) =>
+    getResolvedFeedbackBranchFlow(flow, branchKey)
+  );
+
+  return [...main, ...branchSteps].filter((step) => !step.template_unresolved);
+}
+
+function isSpecialFlowRef(nextId: string): boolean {
+  return (
+    nextId === "feedback_flow.branches" ||
+    nextId === "feedback_flow.verified_transition"
+  );
+}
+
+function resolveStepsByIds(
+  flow: FlowDefinitionV14,
+  nextIds: string[]
+): {
+  steps: ResolvedFlowStepV14[];
+  specialRefs: string[];
+  unresolvedNextIds: string[];
+} {
+  const availableSteps = getAllResolvedFlowSteps(flow);
+  const steps: ResolvedFlowStepV14[] = [];
+  const specialRefs: string[] = [];
+  const unresolvedNextIds: string[] = [];
+
+  for (const nextId of nextIds) {
+    if (isSpecialFlowRef(nextId)) {
+      specialRefs.push(nextId);
+      continue;
+    }
+
+    const matched = availableSteps.find((step) => step.id === nextId);
+    if (matched) {
+      steps.push(matched);
+      continue;
+    }
+
+    unresolvedNextIds.push(nextId);
+  }
+
+  return { steps, specialRefs, unresolvedNextIds };
+}
+
+function resolveRouting(
+  flow: FlowDefinitionV14,
+  state: string,
+  routeContext: string
+): RoutingResolutionResult {
+  const nextIds = resolveNextIdsByState(flow, state, routeContext);
+  const resolved = resolveStepsByIds(flow, nextIds);
+  return {
+    state,
+    route_context: routeContext,
+    nextIds,
+    steps: resolved.steps,
+    specialRefs: resolved.specialRefs,
+    unresolvedNextIds: resolved.unresolvedNextIds,
+  };
+}
+
 type FlowPreviewRow = {
   id: string;
   name: string;
@@ -487,6 +601,8 @@ export default function Home() {
   const [sendTargets, setSendTargets] = useState<Record<ColumnId, boolean>>(
     Object.fromEntries(defaultColumns.map((column) => [column.id, true]))
   );
+  const [routingState, setRoutingState] = useState("Draft");
+  const [routingRouteContext, setRoutingRouteContext] = useState("main");
   const abortRef = useRef<AbortController | null>(null);
 
   const columnIds = useMemo(() => columns.map((column) => column.id), [columns]);
@@ -515,6 +631,44 @@ export default function Home() {
   const selectedFlow = useMemo(() => {
     return flows.find((flow) => flow.id === selectedFlowId) ?? flows[0] ?? defaultFlows[0];
   }, [flows, selectedFlowId]);
+
+  const routingEntries = useMemo(() => {
+    if (!isFlowV14(selectedFlow)) return [];
+    return getStateRoutingEntries(selectedFlow);
+  }, [selectedFlow]);
+
+  const routingStateOptions = useMemo(
+    () => Array.from(new Set(routingEntries.map((entry) => entry.state))),
+    [routingEntries]
+  );
+
+  const routingRouteContextOptions = useMemo(
+    () => routingEntries.filter((entry) => entry.state === routingState).map((entry) => entry.route_context),
+    [routingEntries, routingState]
+  );
+
+  const routingResolution = useMemo(() => {
+    if (!isFlowV14(selectedFlow)) return null;
+    return resolveRouting(selectedFlow, routingState, routingRouteContext);
+  }, [selectedFlow, routingState, routingRouteContext]);
+
+  useEffect(() => {
+    if (!routingEntries.length) return;
+    const exists = routingEntries.some(
+      (entry) => entry.state === routingState && entry.route_context === routingRouteContext
+    );
+    if (!exists) {
+      setRoutingState(routingEntries[0].state);
+      setRoutingRouteContext(routingEntries[0].route_context);
+    }
+  }, [routingEntries, routingState, routingRouteContext]);
+
+  useEffect(() => {
+    if (!routingRouteContextOptions.length) return;
+    if (!routingRouteContextOptions.includes(routingRouteContext)) {
+      setRoutingRouteContext(routingRouteContextOptions[0]);
+    }
+  }, [routingRouteContextOptions, routingRouteContext]);
 
   useEffect(() => {
     const stored = localStorage.getItem("tri-ai-common-system-prompt");
@@ -1334,6 +1488,71 @@ export default function Home() {
                         </div>
                       );
                     })}
+                  </div>
+                )}
+
+                {/* Routing resolver preview for v1.4 */}
+                {selectedFlow && isFlowV14(selectedFlow) && (
+                  <div style={{ marginTop: "12px", paddingTop: "12px", borderTop: "1px solid #ddd" }}>
+                    <div style={{ fontSize: "0.95em", fontWeight: "500", marginBottom: "6px" }}>Routing Resolver</div>
+                    <div style={{ fontSize: "0.9em", marginLeft: "10px", marginBottom: "8px" }}>
+                      state_routing entries: {routingEntries.length}
+                    </div>
+                    {routingEntries.length > 0 ? (
+                      <div style={{ marginLeft: "10px", display: "grid", gap: "10px" }}>
+                        <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                          <label style={{ fontSize: "0.9em" }}>
+                            state
+                            <select
+                              value={routingState}
+                              onChange={(e) => setRoutingState(e.target.value)}
+                              style={{ marginLeft: "6px" }}
+                            >
+                              {routingStateOptions.map((stateOption) => (
+                                <option value={stateOption} key={stateOption}>
+                                  {stateOption}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <label style={{ fontSize: "0.9em" }}>
+                            route_context
+                            <select
+                              value={routingRouteContext}
+                              onChange={(e) => setRoutingRouteContext(e.target.value)}
+                              style={{ marginLeft: "6px" }}
+                            >
+                              {routingRouteContextOptions.map((contextOption) => (
+                                <option value={contextOption} key={contextOption}>
+                                  {contextOption}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        </div>
+                        {routingResolution ? (
+                          <div style={{ lineHeight: 1.6 }}>
+                            <div>next: {routingResolution.nextIds.length ? routingResolution.nextIds.join(", ") : "(none)"}</div>
+                            {routingResolution.specialRefs.length > 0 && (
+                              <div>specialRefs: {routingResolution.specialRefs.join(", ")}</div>
+                            )}
+                            {routingResolution.unresolvedNextIds.length > 0 && (
+                              <div style={{ color: "#b33" }}>unresolved: {routingResolution.unresolvedNextIds.join(", ")}</div>
+                            )}
+                            <div>resolved steps: {routingResolution.steps.length}</div>
+                            {routingResolution.steps.map((step) => (
+                              <div key={step.id} style={{ marginLeft: "10px" }}>
+                                • {step.id}: {step.name || step.type || step.route_context || "(no label)"}
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div style={{ marginLeft: "10px" }}>routing preview unavailable</div>
+                        )}
+                      </div>
+                    ) : (
+                      <div style={{ marginLeft: "10px", fontSize: "0.9em" }}>state_routing が未定義または空です。</div>
+                    )}
                   </div>
                 )}
               </div>
