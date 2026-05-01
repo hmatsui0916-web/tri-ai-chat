@@ -140,6 +140,11 @@ type FlowDefinitionV14 = {
 // Union type for both legacy and v1.4
 type FlowDefinition = LegacyFlowDefinition | FlowDefinitionV14;
 
+// Resolved step type with template expansion metadata
+type ResolvedFlowStepV14 = FlowStepV14 & {
+  template_unresolved?: boolean;
+};
+
 const DEFAULT_PAGE_SIZE = 4;
 const MAX_COLUMNS = 10;
 const MIN_COLUMNS = 1;
@@ -307,6 +312,84 @@ function formatFlowEndpoint(value: string | string[] | undefined): string {
   return value || "";
 }
 
+// Template reference resolution utilities
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isFlowStepLike(value: unknown): value is FlowStepV14 {
+  if (!isPlainObject(value)) return false;
+  return (
+    typeof (value as Record<string, unknown>).id === "string" ||
+    typeof (value as Record<string, unknown>).type === "string" ||
+    typeof (value as Record<string, unknown>).from === "string" ||
+    Array.isArray((value as Record<string, unknown>).from)
+  );
+}
+
+function resolveTemplateStep(
+  step: FlowStepV14,
+  templates?: Record<string, unknown>
+): ResolvedFlowStepV14 {
+  // If no template_ref, return as-is
+  if (!step.template_ref) {
+    return step;
+  }
+
+  // If templates not provided, mark as unresolved
+  if (!templates) {
+    return { ...step, template_unresolved: true };
+  }
+
+  // Get the template
+  const template = templates[step.template_ref];
+
+  // If template is not found or not a plain object, mark as unresolved
+  if (!isPlainObject(template)) {
+    return { ...step, template_unresolved: true };
+  }
+
+  // Merge template with step, prioritizing step's explicit values
+  const resolved: ResolvedFlowStepV14 = {
+    // Start with template properties
+    ...(isFlowStepLike(template) ? template : {}),
+    // Override with step's explicit values
+    ...step,
+    // Ensure step's id, name, route_context are always prioritized
+    id: step.id,
+    ...(step.name !== undefined && { name: step.name }),
+    ...(step.route_context !== undefined && { route_context: step.route_context }),
+  };
+
+  return resolved;
+}
+
+function resolveTemplateSteps(
+  steps: FlowStepV14[] | undefined,
+  templates?: Record<string, unknown>
+): ResolvedFlowStepV14[] {
+  if (!Array.isArray(steps)) {
+    return [];
+  }
+
+  return steps.map((step) => resolveTemplateStep(step, templates));
+}
+
+function getResolvedMainFlow(flow: FlowDefinitionV14): ResolvedFlowStepV14[] {
+  return resolveTemplateSteps(flow.main_flow, flow.templates);
+}
+
+function getResolvedFeedbackBranchFlow(
+  flow: FlowDefinitionV14,
+  branchKey: string
+): ResolvedFlowStepV14[] {
+  const branch = flow.feedback_flow?.branches?.[branchKey];
+  if (!branch || !Array.isArray(branch.flow)) {
+    return [];
+  }
+  return resolveTemplateSteps(branch.flow, flow.templates);
+}
+
 type FlowPreviewRow = {
   id: string;
   name: string;
@@ -318,13 +401,14 @@ type FlowPreviewRow = {
 
 function getFlowPreviewRows(flow: FlowDefinition): FlowPreviewRow[] {
   if (isFlowV14(flow)) {
-    return (flow.main_flow || []).map((step) => ({
+    const resolvedSteps = getResolvedMainFlow(flow);
+    return resolvedSteps.map((step) => ({
       id: step.id,
-      name: step.name || "",
+      name: step.template_unresolved ? `${step.name || ""} [未解決]` : (step.name || ""),
       from: formatFlowEndpoint(step.from),
       to: formatFlowEndpoint(step.to),
       state: `${step.state_from ? step.state_from : ""} → ${step.state_to ? step.state_to : ""}`.trim(),
-      type: step.type || step.route_context || "",
+      type: step.template_unresolved ? `${step.type || step.route_context || ""} [ref未解決]` : (step.type || step.route_context || ""),
     }));
   }
 
@@ -1237,13 +1321,19 @@ export default function Home() {
                 {selectedFlow && isFlowV14(selectedFlow) && selectedFlow.feedback_flow?.branches && Object.keys(selectedFlow.feedback_flow.branches).length > 0 && (
                   <div style={{ marginTop: "12px", paddingTop: "12px", borderTop: "1px solid #ddd" }}>
                     <div style={{ fontSize: "0.95em", fontWeight: "500", marginBottom: "6px" }}>Feedback Branches:</div>
-                    {Object.entries(selectedFlow.feedback_flow.branches).map(([branchName, branch]) => (
-                      <div key={branchName} style={{ fontSize: "0.9em", marginLeft: "10px", marginBottom: "4px" }}>
-                        • {branchName}
-                        {branch.description && ` - ${branch.description}`}
-                        {branch.loop && " [loop]"}
-                      </div>
-                    ))}
+                    {Object.entries(selectedFlow.feedback_flow.branches).map(([branchName, branch]) => {
+                      const resolvedBranchSteps = getResolvedFeedbackBranchFlow(selectedFlow, branchName);
+                      const unresolvedCount = resolvedBranchSteps.filter((s) => s.template_unresolved).length;
+                      return (
+                        <div key={branchName} style={{ fontSize: "0.9em", marginLeft: "10px", marginBottom: "4px" }}>
+                          • {branchName}
+                          {branch.description && ` - ${branch.description}`}
+                          {branch.loop && " [loop]"}
+                          {resolvedBranchSteps.length > 0 && ` (${resolvedBranchSteps.length} steps)`}
+                          {unresolvedCount > 0 && ` [${unresolvedCount} 未解決]`}
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>
