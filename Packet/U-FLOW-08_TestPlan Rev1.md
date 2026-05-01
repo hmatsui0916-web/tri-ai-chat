@@ -371,10 +371,12 @@ feedback loopがmax_iterationsを超過した場合に停止できること、�
 
 手順B: branch別counter独立性確認
 
-1. implementation branchを2回実行する
-2. specification branchへ切り替える
+ControlReviewでVerified条件を満たさない状態を維持し、cause_classificationをimplementationからspecificationへ変更できる状態で実施する。
+
+1. implementation branchを2回実行し、loop count = 2 の状態でControlReviewへ戻る
+2. Verified条件を満たさない状態のまま、ControlReviewで cause_classification = specification を選択する
 3. specification branchのloop countを確認する
-4. environment branchへ切り替える
+4. Verified条件を満たさない状態のまま、ControlReviewで cause_classification = environment を選択する
 5. environment branchのloop countを確認する
 
 期待結果B:
