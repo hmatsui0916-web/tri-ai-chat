@@ -153,6 +153,16 @@ type ControlReviewDecision = {
   reason?: string;
 };
 
+type FlowRuntimeState = {
+  state: string;
+  routeContext: string;
+};
+
+const DEFAULT_FLOW_RUNTIME_STATE: FlowRuntimeState = {
+  state: "Draft",
+  routeContext: "main",
+};
+
 type ControlRuntimeResolution =
   | {
       kind: "verified";
@@ -345,6 +355,39 @@ function getFlowStepCount(flow: FlowDefinition): number {
 function formatFlowEndpoint(value: string | string[] | undefined): string {
   if (Array.isArray(value)) return value.join(", ");
   return value || "";
+}
+
+function getStepDisplayName(step: ResolvedFlowStepV14): string {
+  return step.name || step.id || "(unnamed step)";
+}
+
+function getNextRuntimeState(
+  current: FlowRuntimeState,
+  step: ResolvedFlowStepV14
+): FlowRuntimeState {
+  return {
+    state: step.state_to || current.state,
+    routeContext: step.route_context || current.routeContext,
+  };
+}
+
+function isExternalHandoffStep(step: ResolvedFlowStepV14): boolean {
+  return step.type === "external_handoff";
+}
+
+function buildExternalHandoffText(step: ResolvedFlowStepV14): string {
+  return [
+    `Step: ${step.id}${step.name ? ` (${step.name})` : ""}`,
+    `Type: ${step.type || "(none)"}`,
+    `From: ${formatFlowEndpoint(step.from)}`,
+    `To: ${formatFlowEndpoint(step.to)}`,
+    `State from: ${step.state_from || "(none)"}`,
+    `State to: ${step.state_to || "(none)"}`,
+    `Route context: ${step.route_context || "(none)"}`,
+    "",
+    "Instruction:",
+    step.instruction || "(no instruction)",
+  ].join("\n");
 }
 
 // Template reference resolution utilities
@@ -720,6 +763,7 @@ export default function Home() {
   );
   const [routingState, setRoutingState] = useState("Draft");
   const [routingRouteContext, setRoutingRouteContext] = useState("main");
+  const [flowRuntimeState, setFlowRuntimeState] = useState<FlowRuntimeState>(DEFAULT_FLOW_RUNTIME_STATE);
   const [controlVerified, setControlVerified] = useState(false);
   const [controlCause, setControlCause] = useState<ControlCause>("implementation");
   const abortRef = useRef<AbortController | null>(null);
@@ -779,6 +823,46 @@ export default function Home() {
     });
   }, [selectedFlow, routingResolution, controlVerified, controlCause]);
 
+  const flowRuntimeNextSteps = useMemo(() => {
+    if (!isFlowV14(selectedFlow)) return [] as ResolvedFlowStepV14[];
+    const runtimeRouting = resolveRouting(selectedFlow, flowRuntimeState.state, flowRuntimeState.routeContext);
+    return runtimeRouting?.steps ?? [];
+  }, [selectedFlow, flowRuntimeState]);
+
+  const applyResolvedStep = (
+    step: ResolvedFlowStepV14,
+    options?: { stateOverride?: string; routeContextOverride?: string }
+  ) => {
+    setFlowRuntimeState((current) => ({
+      state: options?.stateOverride ?? step.state_to ?? current.state,
+      routeContext: options?.routeContextOverride ?? step.route_context ?? current.routeContext,
+    }));
+  };
+
+  const applyControlReviewResolution = (resolution: ControlRuntimeResolution) => {
+    if (resolution.kind !== "verified" || !isFlowV14(selectedFlow)) return;
+
+    const stepOverride = resolution.nextStepId
+      ? resolveStepsByIds(selectedFlow, [resolution.nextStepId]).steps[0]
+      : undefined;
+
+    setFlowRuntimeState((current) => ({
+      state: resolution.state_to ?? stepOverride?.state_to ?? current.state,
+      routeContext:
+        resolution.route_context_reset ?? stepOverride?.route_context ?? current.routeContext,
+    }));
+  };
+
+  const copyStepText = (step: ResolvedFlowStepV14) => {
+    const text = isExternalHandoffStep(step)
+      ? buildExternalHandoffText(step)
+      : `Step: ${getStepDisplayName(step)}\nType: ${step.type || "(none)"}`;
+    navigator.clipboard
+      .writeText(text)
+      .then(() => setCopyStatus(`Copied handoff text for ${step.id}`))
+      .catch(() => setCopyStatus("Failed to copy handoff text"));
+  };
+
   useEffect(() => {
     if (!routingEntries.length) return;
     const exists = routingEntries.some(
@@ -796,6 +880,10 @@ export default function Home() {
       setRoutingRouteContext(routingRouteContextOptions[0]);
     }
   }, [routingRouteContextOptions, routingRouteContext]);
+
+  useEffect(() => {
+    setFlowRuntimeState(DEFAULT_FLOW_RUNTIME_STATE);
+  }, [selectedFlowId]);
 
   useEffect(() => {
     const stored = localStorage.getItem("tri-ai-common-system-prompt");
@@ -1716,6 +1804,13 @@ export default function Home() {
                               <div>state_from: {controlReviewResolution.state_from || "(none)"}</div>
                               <div>state_to: {controlReviewResolution.state_to || "(none)"}</div>
                               <div>route_context_reset: {controlReviewResolution.route_context_reset || "(none)"}</div>
+                              <button
+                                type="button"
+                                onClick={() => applyControlReviewResolution(controlReviewResolution)}
+                                style={{ marginTop: "8px" }}
+                              >
+                                Apply verified transition
+                              </button>
                             </>
                           )}
                           {controlReviewResolution.kind === "feedback_branch" && (
@@ -1741,6 +1836,42 @@ export default function Home() {
                       ) : (
                         <div style={{ marginLeft: "10px" }}>ControlReview preview unavailable</div>
                       )}
+                    </div>
+                  </div>
+                )}
+
+                {selectedFlow && isFlowV14(selectedFlow) && (
+                  <div style={{ marginTop: "12px", paddingTop: "12px", borderTop: "1px solid #ddd" }}>
+                    <div style={{ fontSize: "0.95em", fontWeight: "500", marginBottom: "6px" }}>Flow Runtime</div>
+                    <div style={{ display: "grid", gap: "10px", marginLeft: "10px" }}>
+                      <div>Current state: {flowRuntimeState.state}</div>
+                      <div>Current route_context: {flowRuntimeState.routeContext}</div>
+                      <div>Next steps: {flowRuntimeNextSteps.length ? flowRuntimeNextSteps.length : "(none)"}</div>
+
+                      {flowRuntimeNextSteps.map((step) => (
+                        <div key={step.id} style={{ border: "1px solid #ddd", borderRadius: "6px", padding: "8px" }}>
+                          <div style={{ fontWeight: 600 }}>{getStepDisplayName(step)}</div>
+                          <div style={{ fontSize: "0.9em", color: "#555" }}>
+                            {step.type || "(no type)"} / state_to: {step.state_to || "(none)"} / route_context: {step.route_context || "(none)"}
+                          </div>
+                          <div style={{ marginTop: "8px", display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                            {step.human_gate ? (
+                              <button type="button" onClick={() => applyResolvedStep(step)}>
+                                Approve human gate
+                              </button>
+                            ) : (
+                              <button type="button" onClick={() => applyResolvedStep(step)}>
+                                Advance to step
+                              </button>
+                            )}
+                            {isExternalHandoffStep(step) && (
+                              <button type="button" onClick={() => copyStepText(step)}>
+                                Copy handoff text
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      ))}
                     </div>
                   </div>
                 )}
