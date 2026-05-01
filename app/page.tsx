@@ -170,6 +170,26 @@ type ParallelRuntimeState = {
   tasks: ParallelTaskStatus[];
 };
 
+type FeedbackLoopCounts = Partial<Record<ControlCause, number>>;
+
+type LoopLimitCheckResult =
+  | {
+      allowed: true;
+      branchKey: ControlCause;
+      currentCount: number;
+      nextCount: number;
+      maxIterations: number;
+      warning?: string;
+    }
+  | {
+      allowed: false;
+      branchKey: ControlCause;
+      currentCount: number;
+      nextCount: number;
+      maxIterations?: number;
+      reason: string;
+    };
+
 const DEFAULT_FLOW_RUNTIME_STATE: FlowRuntimeState = {
   state: "Draft",
   routeContext: "main",
@@ -428,6 +448,107 @@ function updateParallelTaskStatus(
 
 function isExternalHandoffStep(step: ResolvedFlowStepV14): boolean {
   return step.type === "external_handoff";
+}
+
+function createEmptyFeedbackLoopCounts(): FeedbackLoopCounts {
+  return {
+    implementation: 0,
+    specification: 0,
+    environment: 0,
+  };
+}
+
+function getBranchLoopConfig(
+  flow: FlowDefinitionV14,
+  branchKey: ControlCause
+): {
+  loop?: boolean;
+  maxIterations?: number;
+  fallbackMaxIterations?: number;
+} {
+  const branch = flow.feedback_flow?.branches?.[branchKey];
+  if (!isPlainObject(branch)) {
+    return {};
+  }
+
+  return {
+    loop: typeof branch.loop === "boolean" ? branch.loop : undefined,
+    maxIterations: typeof branch.max_iterations === "number" ? branch.max_iterations : undefined,
+    fallbackMaxIterations: typeof flow.feedback_flow?.max_iterations === "number" ? flow.feedback_flow.max_iterations : undefined,
+  };
+}
+
+function getEffectiveMaxIterations(
+  flow: FlowDefinitionV14,
+  branchKey: ControlCause
+): number | undefined {
+  const config = getBranchLoopConfig(flow, branchKey);
+  return config.maxIterations ?? config.fallbackMaxIterations;
+}
+
+function checkLoopLimit(
+  flow: FlowDefinitionV14,
+  counts: FeedbackLoopCounts,
+  branchKey: ControlCause
+): LoopLimitCheckResult {
+  const config = getBranchLoopConfig(flow, branchKey);
+  const currentCount = counts[branchKey] ?? 0;
+  const nextCount = currentCount + 1;
+  const maxIterations = getEffectiveMaxIterations(flow, branchKey);
+
+  if (config.loop !== true) {
+    return {
+      allowed: false,
+      branchKey,
+      currentCount,
+      nextCount,
+      reason: `Branch ${branchKey} is not configured for looping (loop=${config.loop}).`,
+    };
+  }
+
+  if (maxIterations === undefined) {
+    return {
+      allowed: false,
+      branchKey,
+      currentCount,
+      nextCount,
+      reason: `No max_iterations defined for branch ${branchKey} or globally.`,
+    };
+  }
+
+  if (nextCount > maxIterations) {
+    return {
+      allowed: false,
+      branchKey,
+      currentCount,
+      nextCount,
+      maxIterations,
+      reason: `Maximum iterations (${maxIterations}) exceeded for branch ${branchKey}.`,
+    };
+  }
+
+  return {
+    allowed: true,
+    branchKey,
+    currentCount,
+    nextCount,
+    maxIterations,
+    warning: nextCount === maxIterations ? `This is the last allowed iteration for branch ${branchKey}.` : undefined,
+  };
+}
+
+function incrementLoopCount(
+  counts: FeedbackLoopCounts,
+  branchKey: ControlCause
+): FeedbackLoopCounts {
+  return {
+    ...counts,
+    [branchKey]: (counts[branchKey] ?? 0) + 1,
+  };
+}
+
+function shouldResetLoopCountsOnResolution(resolution: ControlRuntimeResolution): boolean {
+  return resolution.kind === "verified";
 }
 
 function buildExternalHandoffText(step: ResolvedFlowStepV14): string {
@@ -820,6 +941,7 @@ export default function Home() {
   const [routingRouteContext, setRoutingRouteContext] = useState("main");
   const [flowRuntimeState, setFlowRuntimeState] = useState<FlowRuntimeState>(DEFAULT_FLOW_RUNTIME_STATE);
   const [parallelRuntimeState, setParallelRuntimeState] = useState<ParallelRuntimeState | null>(null);
+  const [feedbackLoopCounts, setFeedbackLoopCounts] = useState<FeedbackLoopCounts>(createEmptyFeedbackLoopCounts());
   const [controlVerified, setControlVerified] = useState(false);
   const [controlCause, setControlCause] = useState<ControlCause>("implementation");
   const abortRef = useRef<AbortController | null>(null);
@@ -927,17 +1049,40 @@ export default function Home() {
   };
 
   const applyControlReviewResolution = (resolution: ControlRuntimeResolution) => {
-    if (resolution.kind !== "verified" || !isFlowV14(selectedFlow)) return;
+    if (resolution.kind !== "verified" && resolution.kind !== "feedback_branch") return;
+    if (!isFlowV14(selectedFlow)) return;
 
-    const stepOverride = resolution.nextStepId
-      ? resolveStepsByIds(selectedFlow, [resolution.nextStepId]).steps[0]
-      : undefined;
+    if (resolution.kind === "verified") {
+      // Reset loop counts on verified transition
+      setFeedbackLoopCounts(createEmptyFeedbackLoopCounts());
+      const stepOverride = resolution.nextStepId
+        ? resolveStepsByIds(selectedFlow, [resolution.nextStepId]).steps[0]
+        : undefined;
 
-    setFlowRuntimeState((current) => ({
-      state: resolution.state_to ?? stepOverride?.state_to ?? current.state,
-      routeContext:
-        resolution.route_context_reset ?? stepOverride?.route_context ?? current.routeContext,
-    }));
+      setFlowRuntimeState((current) => ({
+        state: resolution.state_to ?? stepOverride?.state_to ?? current.state,
+        routeContext:
+          resolution.route_context_reset ?? stepOverride?.route_context ?? current.routeContext,
+      }));
+      return;
+    }
+
+    if (resolution.kind === "feedback_branch") {
+      // Check loop limit before applying
+      const limitCheck = checkLoopLimit(selectedFlow, feedbackLoopCounts, resolution.branchKey);
+      if (!limitCheck.allowed) {
+        setGlobalError(`Loop limit exceeded: ${limitCheck.reason}`);
+        return;
+      }
+
+      // Increment count and apply transition
+      setFeedbackLoopCounts((current) => incrementLoopCount(current, resolution.branchKey));
+      setFlowRuntimeState((current) => ({
+        state: resolution.state_rollback_to ?? current.state,
+        routeContext: resolution.route_context ?? current.routeContext,
+      }));
+      return;
+    }
   };
 
   const copyStepText = (step: ResolvedFlowStepV14) => {
@@ -971,6 +1116,7 @@ export default function Home() {
   useEffect(() => {
     setFlowRuntimeState(DEFAULT_FLOW_RUNTIME_STATE);
     setParallelRuntimeState(null);
+    setFeedbackLoopCounts(createEmptyFeedbackLoopCounts());
   }, [selectedFlowId]);
 
   useEffect(() => {
@@ -1863,6 +2009,19 @@ export default function Home() {
                   <div style={{ marginTop: "12px", paddingTop: "12px", borderTop: "1px solid #ddd" }}>
                     <div style={{ fontSize: "0.95em", fontWeight: "500", marginBottom: "6px" }}>ControlReview Runtime</div>
                     <div style={{ display: "grid", gap: "10px", marginLeft: "10px" }}>
+                      <div style={{ display: "grid", gap: "4px" }}>
+                        <div style={{ fontSize: "0.9em", fontWeight: "500" }}>Feedback Loop Counts:</div>
+                        {(Object.keys(feedbackLoopCounts) as ControlCause[]).map((cause) => {
+                          const count = feedbackLoopCounts[cause] ?? 0;
+                          const maxIter = getEffectiveMaxIterations(selectedFlow, cause);
+                          const config = getBranchLoopConfig(selectedFlow, cause);
+                          return (
+                            <div key={cause} style={{ fontSize: "0.85em", color: "#555" }}>
+                              {cause}: {count}{maxIter !== undefined ? ` / ${maxIter}` : ""} {config.loop !== true ? "(no loop)" : ""}
+                            </div>
+                          );
+                        })}
+                      </div>
                       <div style={{ display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
                         <label style={{ fontSize: "0.9em" }}>
                           <input type="checkbox" checked={controlVerified} onChange={(e) => setControlVerified(e.target.checked)} />
