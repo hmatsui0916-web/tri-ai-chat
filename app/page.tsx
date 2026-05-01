@@ -234,8 +234,8 @@ function normalizeFlows(value: unknown): FlowDefinition[] {
           states: Array.isArray(raw.states) ? raw.states.map((s) => String(s)) : undefined,
           route_contexts: Array.isArray(raw.route_contexts) ? raw.route_contexts.map((c) => String(c)) : undefined,
           review_decision: raw.review_decision && typeof raw.review_decision === "object" ? (raw.review_decision as Record<string, string>) : undefined,
-          templates: raw.templates && typeof raw.templates === "object" ? raw.templates : undefined,
-          external_role_policy: raw.external_role_policy && typeof raw.external_role_policy === "object" ? raw.external_role_policy : undefined,
+          templates: raw.templates && typeof raw.templates === "object" ? (raw.templates as Record<string, unknown>) : undefined,
+          external_role_policy: raw.external_role_policy && typeof raw.external_role_policy === "object" ? (raw.external_role_policy as Record<string, unknown>) : undefined,
           main_flow: Array.isArray(raw.main_flow)
             ? (raw.main_flow as Array<Record<string, unknown>>)
                 .map((step) => ({
@@ -253,7 +253,7 @@ function normalizeFlows(value: unknown): FlowDefinition[] {
                   template_ref: step.template_ref ? String(step.template_ref) : undefined,
                   instruction: step.instruction ? String(step.instruction) : undefined,
                   condition: step.condition ? String(step.condition) : undefined,
-                  branches: step.branches && typeof step.branches === "object" ? step.branches : undefined,
+                  branches: step.branches && typeof step.branches === "object" ? (step.branches as Record<string, unknown>) : undefined,
                 }))
                 .filter((s) => s.id)
             : undefined,
@@ -276,9 +276,9 @@ function normalizeFlows(value: unknown): FlowDefinition[] {
                 to: String(step.to || ""),
                 mode: "manual" as const,
                 instruction: step.instruction ? String(step.instruction) : "",
-              };
+              } as FlowStep;
             })
-            .filter((step): step is FlowStep => Boolean(step))
+            .filter((step): step is FlowStep => step !== null)
         : [];
 
       const legacy: LegacyFlowDefinition = {
