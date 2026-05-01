@@ -1,0 +1,540 @@
+{
+"id": "ai-business-os-full-v1-4",
+"name": "AI Business OS Full Flow v1.4",
+"version": "1.4.0",
+"source_spec": "AI Business OS v1.6.3",
+"description": "v1.3を基盤に、feedback_environmentの順次実行明確化とVerified遷移時のroute_contextリセットを追加した実行用Flow定義",
+"role_bindings": {
+"PM": { "type": "column", "column_id": "col1" },
+"Designer": { "type": "column", "column_id": "col2" },
+"Reviewer": { "type": "column", "column_id": "col3" },
+"Integrator-S": { "type": "column", "column_id": "col4" },
+"Worker": {
+"type": "external",
+"tool": "Copilot",
+"handoff": "manual",
+"send_api_request": false,
+"output_return": "paste_or_file_attach"
+},
+"Debugger": { "type": "column", "column_id": "col5" },
+"Infra": { "type": "column", "column_id": "col1", "allow_shared_column": true },
+"Integrator-C": { "type": "column", "column_id": "col1", "allow_shared_column": true }
+},
+"states": [
+"Draft",
+"Designed",
+"Reviewed",
+"Integrated",
+"InDev",
+"Debug",
+"ControlReview",
+"Verified",
+"Approved",
+"Done"
+],
+"route_contexts": [
+"main",
+"feedback_implementation",
+"feedback_specification",
+"feedback_environment"
+],
+"review_decision": {
+"pass": "PM",
+"conditional": "PM",
+"reject": "Designer"
+},
+"templates": {
+"reviewer_decision_step": {
+"type": "decision",
+"from": "Reviewer",
+"state_from": "Reviewed",
+"human_gate": true,
+"decision_key": "review_decision",
+"branches": {
+"pass": {
+"to": "PM",
+"state_to": "Reviewed",
+"instruction": "Review PassとしてPMへ承認判断を依頼する。"
+},
+"conditional": {
+"to": "PM",
+"state_to": "Reviewed",
+"instruction": "軽微修正ありのConditionalとしてPMへ判断を依頼する。"
+},
+"reject": {
+"to": "Designer",
+"state_to": "Designed",
+"instruction": "Review RejectとしてDesignerへSpec修正を差し戻す。"
+}
+}
+}
+},
+"external_role_policy": {
+"Worker": {
+"execution": "manual_handoff",
+"send_api_request": false,
+"handoff_target": "VSCode Copilot",
+"output_return": "paste_or_file_attach",
+"requires_human_gate": true
+}
+},
+"main_flow": [
+{
+"id": "main-01",
+"name": "Human to PM",
+"type": "single",
+"route_context": "main",
+"from": "Human",
+"to": "PM",
+"state_from": "Draft",
+"state_to": "Draft",
+"human_gate": true,
+"instruction": "HumanのGoal、Scope、優先順位をPM判断用入力として渡す。"
+},
+{
+"id": "main-02",
+"name": "PM to Designer",
+"type": "single",
+"route_context": "main",
+"from": "PM",
+"to": "Designer",
+"state_from": "Draft",
+"state_to": "Designed",
+"human_gate": true,
+"instruction": "PM判断をDesignerへ渡し、Spec作成を依頼する。"
+},
+{
+"id": "main-03",
+"name": "Designer to Reviewer",
+"type": "single",
+"route_context": "main",
+"from": "Designer",
+"to": "Reviewer",
+"state_from": "Designed",
+"state_to": "Reviewed",
+"human_gate": true,
+"instruction": "DesignerのSpecをReviewerへ渡し、整合性・リスク・曖昧性をレビューさせる。"
+},
+{
+"id": "main-04",
+"name": "Reviewer Decision",
+"template_ref": "reviewer_decision_step",
+"route_context": "main"
+},
+{
+"id": "main-05",
+"name": "PM to Integrator-S",
+"type": "single",
+"route_context": "main",
+"from": "PM",
+"to": "Integrator-S",
+"state_from": "Reviewed",
+"state_to": "Integrated",
+"human_gate": true,
+"instruction": "PM承認済みSpecをIntegrator-Sへ渡し、Worker Packetへ構造化する。"
+},
+{
+"id": "main-06",
+"name": "Integrator-S to Worker",
+"type": "external_handoff",
+"route_context": "main",
+"from": "Integrator-S",
+"to": "Worker",
+"state_from": "Integrated",
+"state_to": "InDev",
+"human_gate": true,
+"instruction": "Worker Deployment PacketをVSCode Copilotへ手動投入する。"
+},
+{
+"id": "main-07",
+"name": "Worker Output to Debugger and Infra",
+"type": "parallel",
+"route_context": "main",
+"from": "Worker",
+"to": ["Debugger", "Infra"],
+"state_from": "InDev",
+"state_to": "Debug",
+"human_gate": true,
+"join": "all_complete",
+"instruction": "Worker成果物をDebuggerの机上検証とInfra+Humanの実機検証に並列投入する。"
+},
+{
+"id": "main-08",
+"name": "Verification Results to Integrator-C",
+"type": "join",
+"route_context": "main",
+"from": ["Debugger", "Infra"],
+"to": "Integrator-C",
+"state_from": "Debug",
+"state_to": "ControlReview",
+"human_gate": true,
+"instruction": "Debugger ReportとInfra/Human ResultをIntegrator-Cへ集約し、起因判定と状態制御を行う。Verified確定はIntegrator-C判定後とする。"
+},
+{
+"id": "main-09",
+"name": "Integrator-C Verified to PM",
+"type": "single",
+"route_context": "main",
+"from": "Integrator-C",
+"to": "PM",
+"state_from": "Verified",
+"state_to": "Approved",
+"human_gate": true,
+"instruction": "Integrator-CがVerified判定したControl DecisionをPMへ渡し、承認判断を行う。"
+},
+{
+"id": "main-10",
+"name": "PM to Human",
+"type": "single",
+"route_context": "main",
+"from": "PM",
+"to": "Human",
+"state_from": "Approved",
+"state_to": "Done",
+"human_gate": true,
+"instruction": "PM判断をHumanへ提示し、最終承認を得る。"
+}
+],
+"feedback_flow": {
+"entry": "Integrator-C",
+"state_from": "ControlReview",
+"required_inputs": [
+"DebuggerReport",
+"InfraResult",
+"WorkerOutput",
+"Packet",
+"Spec"
+],
+"cause_classification": [
+"implementation",
+"specification",
+"environment"
+],
+"secondary_causes": [
+"Packet不備",
+"Spec曖昧",
+"実装脆弱"
+],
+"max_iterations": 3,
+"loop_exit_condition": "Debugger Pass AND Infra/Human Acceptance OK AND Integrator-C Verified",
+"verified_transition": {
+"condition": "Debugger Pass AND Infra/Human Acceptance OK AND Acceptance Criteria met AND Integrator-C cause review completed",
+"state_from": "ControlReview",
+"state_to": "Verified",
+"route_context_reset": "main",
+"next_step": "main-09"
+},
+"branches": {
+"implementation": {
+"description": "実装起因。仕様とPacketは維持し、Workerへ差戻す。",
+"route_context": "feedback_implementation",
+"loop": true,
+"max_iterations": 3,
+"state_rollback_to": "InDev",
+"flow": [
+{
+"id": "fb-impl-01",
+"from": "Integrator-C",
+"to": "Worker",
+"type": "external_handoff",
+"route_context": "feedback_implementation",
+"state_from": "ControlReview",
+"state_to": "InDev",
+"human_gate": true,
+"instruction": "Integrator-Cの修正指示をWorkerへ手動投入する。SpecとPacketは維持し、実装のみ修正する。"
+},
+{
+"id": "fb-impl-02",
+"from": "Worker",
+"to": ["Debugger", "Infra"],
+"type": "parallel",
+"route_context": "feedback_implementation",
+"state_from": "InDev",
+"state_to": "Debug",
+"human_gate": true,
+"join": "all_complete",
+"instruction": "修正後Worker成果物をDebuggerとInfra+Humanへ再投入する。"
+},
+{
+"id": "fb-impl-03",
+"from": ["Debugger", "Infra"],
+"to": "Integrator-C",
+"type": "join",
+"route_context": "feedback_implementation",
+"state_from": "Debug",
+"state_to": "ControlReview",
+"human_gate": true,
+"instruction": "再検証結果をIntegrator-Cへ集約し、再度起因判定とVerified判定を行う。"
+}
+]
+},
+"specification": {
+"description": "仕様起因。Designerへ差戻し、Reviewer、PM、Integrator-S、Worker、Debugger/Infraを再通過する。",
+"route_context": "feedback_specification",
+"loop": true,
+"max_iterations": 3,
+"state_rollback_to": "Designed",
+"flow": [
+{
+"id": "fb-spec-01",
+"from": "Integrator-C",
+"to": "Designer",
+"type": "single",
+"route_context": "feedback_specification",
+"state_from": "ControlReview",
+"state_to": "Designed",
+"human_gate": true,
+"instruction": "Integrator-Cの起因判定に基づき、DesignerへSpec修正を依頼する。"
+},
+{
+"id": "fb-spec-02",
+"from": "Designer",
+"to": "Reviewer",
+"type": "single",
+"route_context": "feedback_specification",
+"state_from": "Designed",
+"state_to": "Reviewed",
+"human_gate": true,
+"instruction": "修正SpecをReviewerへ渡し、整合性・リスク・曖昧性を再レビューさせる。"
+},
+{
+"id": "fb-spec-03",
+"name": "Reviewer Decision",
+"template_ref": "reviewer_decision_step",
+"route_context": "feedback_specification"
+},
+{
+"id": "fb-spec-04",
+"from": "PM",
+"to": "Integrator-S",
+"type": "single",
+"route_context": "feedback_specification",
+"state_from": "Reviewed",
+"state_to": "Integrated",
+"human_gate": true,
+"instruction": "PM承認済みの修正SpecをIntegrator-Sへ渡し、Worker Packetを再作成する。"
+},
+{
+"id": "fb-spec-05",
+"from": "Integrator-S",
+"to": "Worker",
+"type": "external_handoff",
+"route_context": "feedback_specification",
+"state_from": "Integrated",
+"state_to": "InDev",
+"human_gate": true,
+"instruction": "再作成したWorker Deployment PacketをVSCode Copilotへ手動投入する。"
+},
+{
+"id": "fb-spec-06",
+"from": "Worker",
+"to": ["Debugger", "Infra"],
+"type": "parallel",
+"route_context": "feedback_specification",
+"state_from": "InDev",
+"state_to": "Debug",
+"human_gate": true,
+"join": "all_complete",
+"instruction": "修正実装をDebuggerの机上検証とInfra+Humanの実機検証に並列投入する。"
+},
+{
+"id": "fb-spec-07",
+"from": ["Debugger", "Infra"],
+"to": "Integrator-C",
+"type": "join",
+"route_context": "feedback_specification",
+"state_from": "Debug",
+"state_to": "ControlReview",
+"human_gate": true,
+"instruction": "再検証結果をIntegrator-Cへ集約し、再度起因判定とVerified判定を行う。"
+}
+]
+},
+"environment": {
+"description": "環境起因。コード修正不要の場合のみInfraへ差戻す。コード修正が必要な場合は実装起因または仕様起因へ再分類する。",
+"route_context": "feedback_environment",
+"loop": true,
+"max_iterations": 3,
+"condition": "no_code_change_only",
+"state_rollback_to": "Debug",
+"fallback": {
+"condition": "code_change_required",
+"action": "reclassify_cause",
+"allowed_reclassifications": ["implementation", "specification"]
+},
+"flow": [
+{
+"id": "fb-env-01",
+"from": "Integrator-C",
+"to": "Infra",
+"type": "single",
+"route_context": "feedback_environment",
+"state_from": "ControlReview",
+"state_to": "Debug",
+"human_gate": true,
+"condition": "no_code_change_only",
+"instruction": "Integrator-Cの環境起因判定に基づき、Infraへ環境条件・実機検証手順の修正を依頼する。コード修正は禁止する。"
+},
+{
+"id": "fb-env-02",
+"from": "Infra",
+"to": "Human",
+"type": "manual_execution",
+"route_context": "feedback_environment",
+"state_from": "Debug",
+"state_to": "Debug",
+"human_gate": true,
+"instruction": "Infraの修正手順に基づき、Humanが実機環境の再確認を行う。"
+},
+{
+"id": "fb-env-03",
+"from": "Human",
+"to": "Infra",
+"type": "single",
+"route_context": "feedback_environment",
+"state_from": "Debug",
+"state_to": "Debug",
+"human_gate": true,
+"instruction": "Humanの実機確認結果をInfraへ返し、Infraが結果を整理する。"
+},
+{
+"id": "fb-env-04",
+"from": "Infra",
+"to": "Integrator-C",
+"type": "single",
+"route_context": "feedback_environment",
+"state_from": "Debug",
+"state_to": "ControlReview",
+"human_gate": true,
+"instruction": "Infraが整理した再確認結果をIntegrator-Cへ返し、再度起因判定とVerified判定を行う。"
+}
+]
+}
+}
+},
+"orchestration": {
+"rules": [
+"no_direct_feedback_to_worker",
+"all_feedback_via_integrator_c",
+"state_required_for_transition",
+"route_context_required_for_transition",
+"state_and_route_context_required_for_routing",
+"no_undefined_branching",
+"human_gate_required_for_transition",
+"parallel_steps_require_join",
+"loop_requires_exit_condition",
+"loop_requires_max_iterations",
+"external_roles_require_manual_handoff_policy",
+"control_review_required_before_verified",
+"template_ref_must_resolve_before_execution",
+"verified_transition_resets_route_context"
+],
+"state_routing": [
+{
+"state": "Draft",
+"route_context": "main",
+"next": ["main-02"]
+},
+{
+"state": "Designed",
+"route_context": "main",
+"next": ["main-03"]
+},
+{
+"state": "Reviewed",
+"route_context": "main",
+"next": ["main-05"]
+},
+{
+"state": "Integrated",
+"route_context": "main",
+"next": ["main-06"]
+},
+{
+"state": "InDev",
+"route_context": "main",
+"next": ["main-07"]
+},
+{
+"state": "Debug",
+"route_context": "main",
+"next": ["main-08"]
+},
+{
+"state": "ControlReview",
+"route_context": "main",
+"next": ["feedback_flow.branches", "feedback_flow.verified_transition"]
+},
+{
+"state": "InDev",
+"route_context": "feedback_implementation",
+"next": ["fb-impl-02"]
+},
+{
+"state": "Debug",
+"route_context": "feedback_implementation",
+"next": ["fb-impl-03"]
+},
+{
+"state": "ControlReview",
+"route_context": "feedback_implementation",
+"next": ["feedback_flow.branches", "feedback_flow.verified_transition"]
+},
+{
+"state": "Designed",
+"route_context": "feedback_specification",
+"next": ["fb-spec-02"]
+},
+{
+"state": "Reviewed",
+"route_context": "feedback_specification",
+"next": ["fb-spec-04"]
+},
+{
+"state": "Integrated",
+"route_context": "feedback_specification",
+"next": ["fb-spec-05"]
+},
+{
+"state": "InDev",
+"route_context": "feedback_specification",
+"next": ["fb-spec-06"]
+},
+{
+"state": "Debug",
+"route_context": "feedback_specification",
+"next": ["fb-spec-07"]
+},
+{
+"state": "ControlReview",
+"route_context": "feedback_specification",
+"next": ["feedback_flow.branches", "feedback_flow.verified_transition"]
+},
+{
+"state": "Debug",
+"route_context": "feedback_environment",
+"next": ["fb-env-02"]
+},
+{
+"state": "ControlReview",
+"route_context": "feedback_environment",
+"next": ["feedback_flow.branches", "feedback_flow.verified_transition"]
+},
+{
+"state": "Verified",
+"route_context": "main",
+"next": ["main-09"]
+},
+{
+"state": "Approved",
+"route_context": "main",
+"next": ["main-10"]
+},
+{
+"state": "Done",
+"route_context": "main",
+"next": []
+}
+]
+}
+}
