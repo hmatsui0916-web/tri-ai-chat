@@ -222,6 +222,54 @@ type ControlRuntimeResolution =
       unresolvedReason?: undefined;
     };
 
+// U-FLOW-08R1: New Runtime UI types
+type VerifiedConditionInputs = {
+  debuggerPass: boolean;
+  infraHumanAcceptanceOk: boolean;
+  acceptanceCriteriaMet: boolean;
+  integratorCauseReviewCompleted: boolean;
+};
+
+type RuntimeActionLog = {
+  id: string;
+  timestamp: string;
+  action: string;
+  beforeState: string;
+  beforeRouteContext: string;
+  afterState: string;
+  afterRouteContext: string;
+  stepId?: string;
+  note?: string;
+};
+
+type RuntimeStepStatus = {
+  stepId: string;
+  stepName?: string;
+  stepType?: string;
+  stepState?: string;
+  stepRouteContext?: string;
+  currentStepId?: string;
+};
+
+type RuntimeGuardStatus = {
+  templateUnresolved: boolean;
+  humanGateWaiting: boolean;
+  externalHandoffWaiting: boolean;
+  manualExecutionWaiting: boolean;
+  joinIncomplete: boolean;
+  maxIterationsReached: boolean;
+  details?: Record<string, string>;
+};
+
+type DecisionInput = {
+  decision: "pass" | "conditional" | "reject";
+};
+
+type EnvironmentFallbackInput = {
+  codeChangeRequired: boolean;
+  reclassifyCause?: "implementation" | "specification";
+};
+
 const DEFAULT_PAGE_SIZE = 4;
 const MAX_COLUMNS = 10;
 const MIN_COLUMNS = 1;
@@ -876,6 +924,69 @@ function getFlowPreviewRows(flow: FlowDefinition): FlowPreviewRow[] {
   return [];
 }
 
+// U-FLOW-08R1: Runtime Panel utility functions
+function isVerifiedConditionMet(inputs: VerifiedConditionInputs): boolean {
+  return (
+    inputs.debuggerPass &&
+    inputs.infraHumanAcceptanceOk &&
+    inputs.acceptanceCriteriaMet &&
+    inputs.integratorCauseReviewCompleted
+  );
+}
+
+function applyDecisionStep(
+  step: ResolvedFlowStepV14,
+  flow: FlowDefinitionV14,
+  decision: "pass" | "conditional" | "reject"
+): { state_to?: string; to?: string } {
+  // Get decision branches from template or inline branches
+  let decisionBranches = step.branches;
+  if (!decisionBranches && flow.templates) {
+    const template = (flow.templates as Record<string, any>)["reviewer_decision_step"];
+    if (template && typeof template === "object" && template.branches) {
+      decisionBranches = template.branches;
+    }
+  }
+
+  if (!decisionBranches || typeof decisionBranches !== "object") {
+    return {};
+  }
+  
+  const branch = (decisionBranches as Record<string, any>)[decision];
+  if (!branch || typeof branch !== "object") {
+    return {};
+  }
+
+  return {
+    state_to: branch.state_to,
+    to: branch.to,
+  };
+}
+
+function addActionLog(
+  logs: RuntimeActionLog[],
+  action: string,
+  beforeState: string,
+  beforeRouteContext: string,
+  afterState: string,
+  afterRouteContext: string,
+  stepId?: string,
+  note?: string
+): RuntimeActionLog[] {
+  const log: RuntimeActionLog = {
+    id: crypto.randomUUID(),
+    timestamp: new Date().toISOString(),
+    action,
+    beforeState,
+    beforeRouteContext,
+    afterState,
+    afterRouteContext,
+    stepId,
+    note,
+  };
+  return [...logs, log];
+}
+
 function buildProviderHistories(
   columnHistories: Record<ColumnId, ColumnTurn[]>,
   newPrompt: string,
@@ -944,6 +1055,27 @@ export default function Home() {
   const [feedbackLoopCounts, setFeedbackLoopCounts] = useState<FeedbackLoopCounts>(createEmptyFeedbackLoopCounts());
   const [controlVerified, setControlVerified] = useState(false);
   const [controlCause, setControlCause] = useState<ControlCause>("implementation");
+  // U-FLOW-08R1: Extended runtime state
+  const [currentStepId, setCurrentStepId] = useState<string | null>(null);
+  const [selectedDecision, setSelectedDecision] = useState<"pass" | "conditional" | "reject" | null>(null);
+  const [verifiedConditionInputs, setVerifiedConditionInputs] = useState<VerifiedConditionInputs>({
+    debuggerPass: false,
+    infraHumanAcceptanceOk: false,
+    acceptanceCriteriaMet: false,
+    integratorCauseReviewCompleted: false,
+  });
+  const [codeChangeRequired, setCodeChangeRequired] = useState(false);
+  const [reclassifyCause, setReclassifyCause] = useState<"implementation" | "specification" | null>(null);
+  const [runtimeActionLogs, setRuntimeActionLogs] = useState<RuntimeActionLog[]>([]);
+  const [guardStatus, setGuardStatus] = useState<RuntimeGuardStatus>({
+    templateUnresolved: false,
+    humanGateWaiting: false,
+    externalHandoffWaiting: false,
+    manualExecutionWaiting: false,
+    joinIncomplete: false,
+    maxIterationsReached: false,
+  });
+  const [showFlowRuntimePanel, setShowFlowRuntimePanel] = useState(true);
   const abortRef = useRef<AbortController | null>(null);
 
   const columnIds = useMemo(() => columns.map((column) => column.id), [columns]);
@@ -1022,14 +1154,72 @@ export default function Home() {
     );
   }, [activeParallelStep]);
 
+  const isParallelReadyToAdvance = parallelRuntimeState ? isParallelComplete(parallelRuntimeState) : false;
+
+  useEffect(() => {
+    const currentStep = currentStepId
+      ? flowRuntimeNextSteps.find((step) => step.id === currentStepId)
+      : flowRuntimeNextSteps[0];
+
+    const templateUnresolved = flowRuntimeNextSteps.some((step) => step.template_unresolved === true);
+    const humanGateWaiting = !!currentStep?.human_gate;
+    const externalHandoffWaiting = currentStep ? isExternalHandoffStep(currentStep) : false;
+    const manualExecutionWaiting = currentStep?.type === "manual_execution";
+    const joinIncomplete = !!activeParallelStep && !isParallelReadyToAdvance;
+
+    let maxIterationsReached = false;
+    let maxIterationsDetails: Record<string, string> = {};
+    if (isFlowV14(selectedFlow)) {
+      (Object.keys(feedbackLoopCounts) as ControlCause[]).forEach((branchKey) => {
+        const result = checkLoopLimit(selectedFlow, feedbackLoopCounts, branchKey);
+        if (!result.allowed && result.maxIterations !== undefined) {
+          maxIterationsReached = true;
+          maxIterationsDetails[branchKey] = `${result.currentCount}/${result.maxIterations}`;
+        }
+      });
+    }
+
+    setGuardStatus({
+      templateUnresolved,
+      humanGateWaiting,
+      externalHandoffWaiting,
+      manualExecutionWaiting,
+      joinIncomplete,
+      maxIterationsReached,
+      details: maxIterationsReached ? maxIterationsDetails : undefined,
+    });
+  }, [flowRuntimeNextSteps, currentStepId, activeParallelStep, isParallelReadyToAdvance, feedbackLoopCounts, selectedFlow]);
+
   const applyResolvedStep = (
     step: ResolvedFlowStepV14,
     options?: { stateOverride?: string; routeContextOverride?: string }
   ) => {
-    setFlowRuntimeState((current) => ({
-      state: options?.stateOverride ?? step.state_to ?? current.state,
-      routeContext: options?.routeContextOverride ?? step.route_context ?? current.routeContext,
-    }));
+    const newState = options?.stateOverride ?? step.state_to ?? flowRuntimeState.state;
+    const newRouteContext = options?.routeContextOverride ?? step.route_context ?? flowRuntimeState.routeContext;
+    const newLogs = addActionLog(
+      runtimeActionLogs,
+      `Step: ${step.id}`,
+      flowRuntimeState.state,
+      flowRuntimeState.routeContext,
+      newState,
+      newRouteContext,
+      step.id
+    );
+
+    setFlowRuntimeState({
+      state: newState,
+      routeContext: newRouteContext,
+    });
+    setCurrentStepId(step.id);
+    setRuntimeActionLogs(newLogs);
+
+    // Handle loop increment on cause transition
+    if (step.type === "cause_classification_resolver") {
+      setFeedbackLoopCounts((current) => ({
+        ...current,
+        [controlCause]: (current[controlCause] ?? 0) + 1,
+      }));
+    }
   };
 
   const updateParallelTask = (taskId: string, completed: boolean) => {
@@ -1037,8 +1227,6 @@ export default function Home() {
       current ? updateParallelTaskStatus(current, taskId, completed) : current
     );
   };
-
-  const isParallelReadyToAdvance = parallelRuntimeState ? isParallelComplete(parallelRuntimeState) : false;
 
   const applyParallelStep = () => {
     if (!activeParallelStep || !parallelRuntimeState) return;
@@ -1053,34 +1241,57 @@ export default function Home() {
     if (!isFlowV14(selectedFlow)) return;
 
     if (resolution.kind === "verified") {
-      // Reset loop counts on verified transition
-      setFeedbackLoopCounts(createEmptyFeedbackLoopCounts());
-      const stepOverride = resolution.nextStepId
-        ? resolveStepsByIds(selectedFlow, [resolution.nextStepId]).steps[0]
-        : undefined;
+      const newLogs = addActionLog(
+        runtimeActionLogs,
+        "Verified Transition",
+        flowRuntimeState.state,
+        flowRuntimeState.routeContext,
+        resolution.state_to || flowRuntimeState.state,
+        resolution.route_context_reset || flowRuntimeState.routeContext
+      );
 
-      setFlowRuntimeState((current) => ({
-        state: resolution.state_to ?? stepOverride?.state_to ?? current.state,
-        routeContext:
-          resolution.route_context_reset ?? stepOverride?.route_context ?? current.routeContext,
-      }));
+      setFlowRuntimeState({
+        state: resolution.state_to ?? flowRuntimeState.state,
+        routeContext: resolution.route_context_reset ?? flowRuntimeState.routeContext,
+      });
+
+      if (shouldResetLoopCountsOnResolution(resolution)) {
+        setFeedbackLoopCounts(createEmptyFeedbackLoopCounts());
+      }
+
+      setRuntimeActionLogs(newLogs);
+      setControlVerified(false);
+      setVerifiedConditionInputs({
+        debuggerPass: false,
+        infraHumanAcceptanceOk: false,
+        acceptanceCriteriaMet: false,
+        integratorCauseReviewCompleted: false,
+      });
       return;
     }
 
     if (resolution.kind === "feedback_branch") {
-      // Check loop limit before applying
       const limitCheck = checkLoopLimit(selectedFlow, feedbackLoopCounts, resolution.branchKey);
       if (!limitCheck.allowed) {
         setGlobalError(`Loop limit exceeded: ${limitCheck.reason}`);
         return;
       }
 
-      // Increment count and apply transition
+      const newLogs = addActionLog(
+        runtimeActionLogs,
+        `Feedback Branch: ${resolution.branchKey}`,
+        flowRuntimeState.state,
+        flowRuntimeState.routeContext,
+        resolution.state_rollback_to ?? flowRuntimeState.state,
+        resolution.route_context ?? flowRuntimeState.routeContext
+      );
+
       setFeedbackLoopCounts((current) => incrementLoopCount(current, resolution.branchKey));
-      setFlowRuntimeState((current) => ({
-        state: resolution.state_rollback_to ?? current.state,
-        routeContext: resolution.route_context ?? current.routeContext,
-      }));
+      setFlowRuntimeState({
+        state: resolution.state_rollback_to ?? flowRuntimeState.state,
+        routeContext: resolution.route_context ?? flowRuntimeState.routeContext,
+      });
+      setRuntimeActionLogs(newLogs);
       return;
     }
   };
@@ -1827,6 +2038,7 @@ export default function Home() {
               </label>
               <button className="button secondary" onClick={() => setShowModelSettings((v) => !v)}>{showModelSettings ? "モデル設定を隠す" : "モデル設定"}</button>
               <button className="button secondary" onClick={() => setShowFlowSettings((v) => !v)}>{showFlowSettings ? "Flow設定を隠す" : "Flow設定"}</button>
+              <button className="button secondary" onClick={() => setShowFlowRuntimePanel((v) => !v)}>{showFlowRuntimePanel ? "Runtime パネル非表示" : "Runtime パネル表示"}</button>
               <button className="button secondary" onClick={() => setPage((v) => Math.max(0, v - 1))} disabled={page === 0}>◀ 前</button>
               <button className="button secondary" onClick={() => setPage((v) => Math.min(maxPage, v + 1))} disabled={page >= maxPage}>次 ▶</button>
               <button className="button secondary" onClick={() => setShowSystemPrompts((v) => !v)}>{showSystemPrompts ? "設定欄を隠す" : "設定欄を表示"}</button>
@@ -2168,6 +2380,265 @@ export default function Home() {
 
           {globalError && <div className="error">Error: {globalError}</div>}
           {copyStatus && <div className="copyStatus">{copyStatus}</div>}
+
+          {/* U-FLOW-08R1: Runtime Panel */}
+          {showFlowRuntimePanel && selectedFlow && isFlowV14(selectedFlow) && (
+            <div style={{
+              marginTop: "20px",
+              padding: "16px",
+              border: "2px solid #0066cc",
+              borderRadius: "8px",
+              backgroundColor: "#f0f6ff",
+            }}>
+              <div style={{ fontSize: "1.1em", fontWeight: "bold", marginBottom: "12px", color: "#0066cc" }}>
+                🔧 Flow Runtime Panel - {selectedFlow.name}
+              </div>
+
+              {/* 1. Flow Structure Display */}
+              <div style={{ marginBottom: "16px", padding: "12px", backgroundColor: "#fff", borderRadius: "4px", border: "1px solid #cce5ff" }}>
+                <div style={{ fontSize: "0.95em", fontWeight: "bold", marginBottom: "8px" }}>📋 Flow 構造</div>
+                <div style={{ fontSize: "0.85em", color: "#333", lineHeight: "1.6" }}>
+                  <div><strong>Flow ID:</strong> {selectedFlow.id}</div>
+                  <div><strong>Name:</strong> {selectedFlow.name}</div>
+                  <div><strong>Version:</strong> {selectedFlow.version || "N/A"}</div>
+                  <div><strong>Source Spec:</strong> {selectedFlow.source_spec || "N/A"}</div>
+                  {selectedFlow.main_flow && (
+                    <div><strong>Main Flow Steps:</strong> {selectedFlow.main_flow.length}</div>
+                  )}
+                  {selectedFlow.feedback_flow?.branches && (
+                    <div><strong>Feedback Branches:</strong> {Object.keys(selectedFlow.feedback_flow.branches).join(", ")}</div>
+                  )}
+                </div>
+              </div>
+
+              {/* 2. Runtime State Display */}
+              <div style={{ marginBottom: "16px", padding: "12px", backgroundColor: "#fff", borderRadius: "4px", border: "1px solid #cce5ff" }}>
+                <div style={{ fontSize: "0.95em", fontWeight: "bold", marginBottom: "8px" }}>📊 Runtime 状態</div>
+                <div style={{ fontSize: "0.85em", color: "#333", lineHeight: "1.8" }}>
+                  <div><strong>Current State:</strong> {flowRuntimeState.state}</div>
+                  <div><strong>Current Route Context:</strong> {flowRuntimeState.routeContext}</div>
+                  <div><strong>Current Step ID:</strong> {currentStepId || "(none)"}</div>
+                  <div><strong>Next Steps:</strong> {flowRuntimeNextSteps.length ? flowRuntimeNextSteps.map((s) => s.id).join(", ") : "(none)"}</div>
+                  <div style={{ marginTop: "8px" }}>
+                    <strong>Loop Counts:</strong>
+                    <div style={{ marginLeft: "10px", fontSize: "0.8em" }}>
+                      implementation: {feedbackLoopCounts.implementation || 0}
+                      {getEffectiveMaxIterations(selectedFlow, "implementation") ? ` / ${getEffectiveMaxIterations(selectedFlow, "implementation")}` : ""}
+                    </div>
+                    <div style={{ marginLeft: "10px", fontSize: "0.8em" }}>
+                      specification: {feedbackLoopCounts.specification || 0}
+                      {getEffectiveMaxIterations(selectedFlow, "specification") ? ` / ${getEffectiveMaxIterations(selectedFlow, "specification")}` : ""}
+                    </div>
+                    <div style={{ marginLeft: "10px", fontSize: "0.8em" }}>
+                      environment: {feedbackLoopCounts.environment || 0}
+                      {getEffectiveMaxIterations(selectedFlow, "environment") ? ` / ${getEffectiveMaxIterations(selectedFlow, "environment")}` : ""}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* 3. Runtime Controls */}
+              <div style={{ marginBottom: "16px", padding: "12px", backgroundColor: "#fff", borderRadius: "4px", border: "1px solid #cce5ff" }}>
+                <div style={{ fontSize: "0.95em", fontWeight: "bold", marginBottom: "8px" }}>⚙️ Runtime コントロール</div>
+                <div style={{ display: "grid", gap: "8px" }}>
+                  <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                    <button
+                      onClick={() => {
+                        const newLogs = addActionLog(
+                          runtimeActionLogs,
+                          "Runtime Reset",
+                          flowRuntimeState.state,
+                          flowRuntimeState.routeContext,
+                          "Draft",
+                          "main"
+                        );
+                        setFlowRuntimeState({ state: "Draft", routeContext: "main" });
+                        setCurrentStepId(null);
+                        setFeedbackLoopCounts(createEmptyFeedbackLoopCounts());
+                        setParallelRuntimeState(null);
+                        setRuntimeActionLogs(newLogs);
+                        setCopyStatus("Runtime をリセットしました。");
+                        window.setTimeout(() => setCopyStatus(""), 1800);
+                      }}
+                      style={{ padding: "6px 12px", fontSize: "0.85em", backgroundColor: "#ff6b6b", color: "#fff", border: "none", borderRadius: "4px", cursor: "pointer" }}
+                    >
+                      ↻ Runtime Reset
+                    </button>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
+                    <div>
+                      <label style={{ fontSize: "0.85em", display: "block", marginBottom: "4px" }}>state</label>
+                      <select
+                        value={flowRuntimeState.state}
+                        onChange={(e) => setFlowRuntimeState({ ...flowRuntimeState, state: e.target.value })}
+                        style={{ width: "100%", padding: "4px", fontSize: "0.85em" }}
+                      >
+                        {(selectedFlow.states || ["Draft", "Done"]).map((s) => (
+                          <option value={s} key={s}>{s}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label style={{ fontSize: "0.85em", display: "block", marginBottom: "4px" }}>route_context</label>
+                      <select
+                        value={flowRuntimeState.routeContext}
+                        onChange={(e) => setFlowRuntimeState({ ...flowRuntimeState, routeContext: e.target.value })}
+                        style={{ width: "100%", padding: "4px", fontSize: "0.85em" }}
+                      >
+                        {(selectedFlow.route_contexts || ["main"]).map((c) => (
+                          <option value={c} key={c}>{c}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* 4. Decision & Cause Controls */}
+              {flowRuntimeNextSteps.some((s) => s.decision_key === "review_decision") && (
+                <div style={{ marginBottom: "16px", padding: "12px", backgroundColor: "#fff", borderRadius: "4px", border: "1px solid #cce5ff" }}>
+                  <div style={{ fontSize: "0.95em", fontWeight: "bold", marginBottom: "8px" }}>🎯 Decision Control</div>
+                  <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                    {(["pass", "conditional", "reject"] as const).map((decision) => (
+                      <button
+                        key={decision}
+                        onClick={() => {
+                          const step = flowRuntimeNextSteps.find((s) => s.decision_key === "review_decision");
+                          if (step) {
+                            const result = applyDecisionStep(step, selectedFlow, decision);
+                            const newLogs = addActionLog(
+                              runtimeActionLogs,
+                              `Decision: ${decision}`,
+                              flowRuntimeState.state,
+                              flowRuntimeState.routeContext,
+                              result.state_to || flowRuntimeState.state,
+                              flowRuntimeState.routeContext,
+                              step.id
+                            );
+                            setFlowRuntimeState({
+                              state: result.state_to || flowRuntimeState.state,
+                              routeContext: flowRuntimeState.routeContext,
+                            });
+                            setSelectedDecision(decision);
+                            setRuntimeActionLogs(newLogs);
+                            setCopyStatus(`Decision: ${decision} を選択しました。`);
+                            window.setTimeout(() => setCopyStatus(""), 1800);
+                          }
+                        }}
+                        style={{
+                          padding: "6px 12px",
+                          fontSize: "0.85em",
+                          backgroundColor: decision === selectedDecision ? "#51cf66" : "#e7f5ff",
+                          color: decision === selectedDecision ? "#fff" : "#0066cc",
+                          border: `1px solid ${decision === selectedDecision ? "#37b24d" : "#0066cc"}`,
+                          borderRadius: "4px",
+                          cursor: "pointer",
+                        }}
+                      >
+                        {decision}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* 5. Verified Condition Inputs */}
+              {routingResolution?.specialRefs.includes("ControlReview") && (
+                <div style={{ marginBottom: "16px", padding: "12px", backgroundColor: "#fff", borderRadius: "4px", border: "1px solid #cce5ff" }}>
+                  <div style={{ fontSize: "0.95em", fontWeight: "bold", marginBottom: "8px" }}>✅ Verified 条件</div>
+                  <div style={{ display: "grid", gap: "8px" }}>
+                    {(Object.keys(verifiedConditionInputs) as (keyof VerifiedConditionInputs)[]).map((key) => (
+                      <label key={key} style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.85em", cursor: "pointer" }}>
+                        <input
+                          type="checkbox"
+                          checked={verifiedConditionInputs[key]}
+                          onChange={(e) => {
+                            const newInputs = { ...verifiedConditionInputs, [key]: e.target.checked };
+                            setVerifiedConditionInputs(newInputs);
+                          }}
+                        />
+                        <span>
+                          {key === "debuggerPass" && "Debugger Pass"}
+                          {key === "infraHumanAcceptanceOk" && "Infra/Human Acceptance OK"}
+                          {key === "acceptanceCriteriaMet" && "Acceptance Criteria Met"}
+                          {key === "integratorCauseReviewCompleted" && "Integrator-C Cause Review Completed"}
+                        </span>
+                      </label>
+                    ))}
+                    {isVerifiedConditionMet(verifiedConditionInputs) && (
+                      <div style={{ marginTop: "8px", padding: "8px", backgroundColor: "#d4edda", color: "#155724", borderRadius: "4px", fontSize: "0.85em" }}>
+                        ✓ すべての条件を満たしています。Verified transition が優先されます。
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* 6. Parallel / Join Controls */}
+              {activeParallelStep && parallelRuntimeState && (
+                <div style={{ marginBottom: "16px", padding: "12px", backgroundColor: "#fff", borderRadius: "4px", border: "1px solid #cce5ff" }}>
+                  <div style={{ fontSize: "0.95em", fontWeight: "bold", marginBottom: "8px" }}>⚡ Parallel / Join</div>
+                  <div style={{ display: "grid", gap: "8px" }}>
+                    {parallelRuntimeState.tasks.map((task) => (
+                      <label key={task.id} style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.85em", cursor: "pointer" }}>
+                        <input
+                          type="checkbox"
+                          checked={task.completed}
+                          onChange={(e) => {
+                            const updated = updateParallelTaskStatus(parallelRuntimeState, task.id, e.target.checked);
+                            setParallelRuntimeState(updated);
+                          }}
+                        />
+                        <span>{task.target}</span>
+                      </label>
+                    ))}
+                    {isParallelComplete(parallelRuntimeState) ? (
+                      <button
+                        onClick={() => applyParallelStep()}
+                        style={{ marginTop: "8px", padding: "6px 12px", fontSize: "0.85em", backgroundColor: "#51cf66", color: "#fff", border: "none", borderRadius: "4px", cursor: "pointer" }}
+                      >
+                        ✓ Join 完了して進む
+                      </button>
+                    ) : (
+                      <div style={{ marginTop: "8px", padding: "8px", backgroundColor: "#fff3cd", color: "#856404", borderRadius: "4px", fontSize: "0.85em" }}>
+                        ⚠ すべての並列タスクが完了していません。
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* 7. Guard Status */}
+              {(guardStatus.templateUnresolved || guardStatus.humanGateWaiting || guardStatus.externalHandoffWaiting || guardStatus.manualExecutionWaiting || guardStatus.joinIncomplete) && (
+                <div style={{ marginBottom: "16px", padding: "12px", backgroundColor: "#fff", borderRadius: "4px", border: "1px solid #ffcccc" }}>
+                  <div style={{ fontSize: "0.95em", fontWeight: "bold", marginBottom: "8px", color: "#d32f2f" }}>🚫 Guard 状態</div>
+                  <div style={{ display: "grid", gap: "6px", fontSize: "0.85em" }}>
+                    {guardStatus.templateUnresolved && <div style={{ color: "#d32f2f" }}>⚠ Template Unresolved</div>}
+                    {guardStatus.humanGateWaiting && <div style={{ color: "#f57c00" }}>⏸ Human Gate 待ち</div>}
+                    {guardStatus.externalHandoffWaiting && <div style={{ color: "#f57c00" }}>⏸ External Handoff 待ち</div>}
+                    {guardStatus.manualExecutionWaiting && <div style={{ color: "#f57c00" }}>⏸ Manual Execution 待ち</div>}
+                    {guardStatus.joinIncomplete && <div style={{ color: "#f57c00" }}>⏸ Join 未完了</div>}
+                  </div>
+                </div>
+              )}
+
+              {/* 8. Action Log */}
+              {runtimeActionLogs.length > 0 && (
+                <div style={{ marginBottom: "16px", padding: "12px", backgroundColor: "#fff", borderRadius: "4px", border: "1px solid #cce5ff" }}>
+                  <div style={{ fontSize: "0.95em", fontWeight: "bold", marginBottom: "8px" }}>📝 Action Log ({runtimeActionLogs.length})</div>
+                  <div style={{ maxHeight: "200px", overflowY: "auto", fontSize: "0.75em", color: "#555", lineHeight: "1.4" }}>
+                    {runtimeActionLogs.slice().reverse().map((log) => (
+                      <div key={log.id} style={{ marginBottom: "6px", padding: "6px", backgroundColor: "#f9f9f9", borderRadius: "3px", borderLeft: "3px solid #0066cc" }}>
+                        <div><strong>{log.action}</strong> - {new Date(log.timestamp).toLocaleTimeString("ja-JP")}</div>
+                        <div>{log.beforeState}/{log.beforeRouteContext} → {log.afterState}/{log.afterRouteContext}</div>
+                        {log.stepId && <div>Step: {log.stepId}</div>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </section>
 
         <section
