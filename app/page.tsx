@@ -790,16 +790,16 @@ function findRuntimeCurrentStep(
     return null;
   }
 
-  const routed = runtimeRouting.steps;
-  const routedCandidate = routed.find((step) => !completed.has(step.id));
-  if (routedCandidate) return routedCandidate;
-
   const routeSteps = getResolvedStepsForRoute(flow, runtimeState.routeContext);
   const lastCompletedIndex = routeSteps.reduce((lastIndex, step, index) => {
     return completed.has(step.id) ? index : lastIndex;
   }, -1);
 
-  return routeSteps.slice(lastCompletedIndex + 1).find((step) => !completed.has(step.id)) ?? null;
+  const sequentialCandidate = routeSteps.slice(lastCompletedIndex + 1).find((step) => !completed.has(step.id));
+  if (sequentialCandidate) return sequentialCandidate;
+
+  const routed = runtimeRouting.steps;
+  return routed.find((step) => !completed.has(step.id)) ?? null;
 }
 
 function findPreviousRouteStep(
@@ -1291,7 +1291,11 @@ export default function Home() {
     const previousStep = isFlowV14(selectedFlow) && currentStep ? findPreviousRouteStep(selectedFlow, currentStep) : null;
     const joinIncomplete =
       (!!activeParallelStep && !isParallelReadyToAdvance) ||
-      (currentStep?.type === "join" && !!previousStep && isParallelStep(previousStep) && !completedParallelStepIds.includes(previousStep.id));
+      (currentStep?.type === "join" &&
+        !!previousStep &&
+        isParallelStep(previousStep) &&
+        !completedStepIds.includes(previousStep.id) &&
+        !completedParallelStepIds.includes(previousStep.id));
 
     let maxIterationsReached = false;
     let maxIterationsDetails: Record<string, string> = {};
@@ -1363,7 +1367,12 @@ export default function Home() {
 
     if (step.type === "join" && isFlowV14(selectedFlow)) {
       const previousStep = findPreviousRouteStep(selectedFlow, step);
-      if (previousStep && isParallelStep(previousStep) && !completedParallelStepIds.includes(previousStep.id)) {
+      if (
+        previousStep &&
+        isParallelStep(previousStep) &&
+        !completedStepIds.includes(previousStep.id) &&
+        !completedParallelStepIds.includes(previousStep.id)
+      ) {
         setCopyStatus(`Join is waiting for ${previousStep.id}`);
         window.setTimeout(() => setCopyStatus(""), 1800);
         return;
@@ -1495,7 +1504,12 @@ export default function Home() {
     if (isParallelStep(currentStep) && !isParallelReadyToAdvance) return true;
     if (currentStep.type === "join") {
       const previousStep = findPreviousRouteStep(selectedFlow, currentStep);
-      if (previousStep && isParallelStep(previousStep) && !completedParallelStepIds.includes(previousStep.id)) return true;
+      if (
+        previousStep &&
+        isParallelStep(previousStep) &&
+        !completedStepIds.includes(previousStep.id) &&
+        !completedParallelStepIds.includes(previousStep.id)
+      ) return true;
     }
     return false;
   }, [
@@ -2991,7 +3005,10 @@ export default function Home() {
                   <div style={{ fontSize: "0.95em", fontWeight: "bold", marginBottom: "8px" }}>Join Control</div>
                   {(() => {
                     const previousStep = findPreviousRouteStep(selectedFlow, currentStep);
-                    const previousParallelComplete = !!previousStep && isParallelStep(previousStep) && completedParallelStepIds.includes(previousStep.id);
+                    const previousParallelComplete =
+                      !!previousStep &&
+                      isParallelStep(previousStep) &&
+                      (completedStepIds.includes(previousStep.id) || completedParallelStepIds.includes(previousStep.id));
                     return (
                       <div style={{ display: "grid", gap: "8px", fontSize: "0.85em" }}>
                         <div>Previous parallel step: {previousStep?.id || "(none)"}</div>
