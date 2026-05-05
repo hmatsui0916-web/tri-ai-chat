@@ -1533,6 +1533,10 @@ export default function Home() {
         setGlobalError(`Loop limit exceeded: ${limitCheck.reason}`);
         return;
       }
+      const branchStepIds = new Set(
+        getResolvedStepsForRoute(selectedFlow, resolution.route_context ?? flowRuntimeState.routeContext)
+          .map((step) => step.id)
+      );
 
       const newLogs = addActionLog(
         runtimeActionLogs,
@@ -1544,6 +1548,11 @@ export default function Home() {
       );
 
       setFeedbackLoopCounts((current) => incrementLoopCount(current, resolution.branchKey));
+      setCompletedStepIds((current) => current.filter((stepId) => !branchStepIds.has(stepId)));
+      setClearedHumanGateStepIds((current) => current.filter((stepId) => !branchStepIds.has(stepId)));
+      setClearedExternalHandoffStepIds((current) => current.filter((stepId) => !branchStepIds.has(stepId)));
+      setClearedManualExecutionStepIds((current) => current.filter((stepId) => !branchStepIds.has(stepId)));
+      setCompletedParallelStepIds((current) => current.filter((stepId) => !branchStepIds.has(stepId)));
       setFlowRuntimeState({
         state: resolution.state_rollback_to ?? flowRuntimeState.state,
         routeContext: resolution.route_context ?? flowRuntimeState.routeContext,
