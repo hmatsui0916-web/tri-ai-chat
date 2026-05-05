@@ -255,6 +255,7 @@ type RuntimeStepStatus = {
 
 type RuntimeGuardStatus = {
   templateUnresolved: boolean;
+  decisionWaiting: boolean;
   humanGateWaiting: boolean;
   externalHandoffWaiting: boolean;
   manualExecutionWaiting: boolean;
@@ -1163,6 +1164,7 @@ export default function Home() {
   const [runtimeActionLogs, setRuntimeActionLogs] = useState<RuntimeActionLog[]>([]);
   const [guardStatus, setGuardStatus] = useState<RuntimeGuardStatus>({
     templateUnresolved: false,
+    decisionWaiting: false,
     humanGateWaiting: false,
     externalHandoffWaiting: false,
     manualExecutionWaiting: false,
@@ -1285,7 +1287,8 @@ export default function Home() {
 
   useEffect(() => {
     const templateUnresolved = flowRuntimeNextSteps.some((step) => step.template_unresolved === true);
-    const humanGateWaiting = !!currentStep?.human_gate && !clearedHumanGateStepIds.includes(currentStep.id);
+    const decisionWaiting = !!currentStep?.decision_key && !completedStepIds.includes(currentStep.id);
+    const humanGateWaiting = !!currentStep?.human_gate && !currentStep?.decision_key && !clearedHumanGateStepIds.includes(currentStep.id);
     const externalHandoffWaiting = currentStep ? isExternalHandoffStep(currentStep) && !clearedExternalHandoffStepIds.includes(currentStep.id) : false;
     const manualExecutionWaiting = currentStep?.type === "manual_execution" && !clearedManualExecutionStepIds.includes(currentStep.id);
     const previousStep = isFlowV14(selectedFlow) && currentStep ? findPreviousRouteStep(selectedFlow, currentStep) : null;
@@ -1311,6 +1314,7 @@ export default function Home() {
 
     setGuardStatus({
       templateUnresolved,
+      decisionWaiting,
       humanGateWaiting,
       externalHandoffWaiting,
       manualExecutionWaiting,
@@ -1337,6 +1341,12 @@ export default function Home() {
   ) => {
     if (completedStepIds.includes(step.id)) {
       setCopyStatus(`Step ${step.id} is already completed`);
+      window.setTimeout(() => setCopyStatus(""), 1800);
+      return;
+    }
+
+    if (step.decision_key) {
+      setCopyStatus(`Decision is still waiting for ${step.id}`);
       window.setTimeout(() => setCopyStatus(""), 1800);
       return;
     }
@@ -1416,12 +1426,6 @@ export default function Home() {
     }
   };
 
-  const updateParallelTask = (taskId: string, completed: boolean) => {
-    setParallelRuntimeState((current) =>
-      current ? updateParallelTaskStatus(current, taskId, completed) : current
-    );
-  };
-
   const applyParallelStep = () => {
     if (!activeParallelStep || !parallelRuntimeState) return;
     if (!isParallelReadyToAdvance) return;
@@ -1431,6 +1435,51 @@ export default function Home() {
     );
     applyResolvedStep(activeParallelStep);
     setParallelRuntimeState(null);
+  };
+
+  const markParallelTask = (taskId: string, completed: boolean) => {
+    if (!activeParallelStep || !parallelRuntimeState) return;
+
+    const task = parallelRuntimeState.tasks.find((item) => item.id === taskId);
+    const updated = updateParallelTaskStatus(parallelRuntimeState, taskId, completed);
+    const willComplete = isParallelComplete(updated);
+    const nextCompletedParallelStepIds = willComplete && !completedParallelStepIds.includes(activeParallelStep.id)
+      ? [...completedParallelStepIds, activeParallelStep.id]
+      : completedParallelStepIds;
+    const nextCompletedStepIds = willComplete && !completedStepIds.includes(activeParallelStep.id)
+      ? [...completedStepIds, activeParallelStep.id]
+      : completedStepIds;
+    const nextState = willComplete ? activeParallelStep.state_to || flowRuntimeState.state : flowRuntimeState.state;
+    const nextRouteContext = willComplete ? activeParallelStep.route_context || flowRuntimeState.routeContext : flowRuntimeState.routeContext;
+    const nextStep = willComplete && isFlowV14(selectedFlow)
+      ? findRuntimeCurrentStep(
+          selectedFlow,
+          { state: nextState, routeContext: nextRouteContext },
+          nextCompletedStepIds
+        )
+      : activeParallelStep;
+    const action = task
+      ? completed ? `Parallel Task Completed: ${task.target}` : `Parallel Task Reopened: ${task.target}`
+      : completed ? `Parallel Task Completed: ${taskId}` : `Parallel Task Reopened: ${taskId}`;
+    const newLogs = addActionLog(
+      runtimeActionLogs,
+      willComplete && completed ? `${action} / Parallel Completed: ${activeParallelStep.id}` : action,
+      flowRuntimeState.state,
+      flowRuntimeState.routeContext,
+      nextState,
+      nextRouteContext,
+      activeParallelStep.id,
+      taskId
+    );
+
+    setParallelRuntimeState(willComplete ? null : updated);
+    setCompletedParallelStepIds(nextCompletedParallelStepIds);
+    setCompletedStepIds(nextCompletedStepIds);
+    setFlowRuntimeState({ state: nextState, routeContext: nextRouteContext });
+    setCurrentStepId(nextStep?.id ?? null);
+    setRuntimeActionLogs(newLogs);
+    setCopyStatus(willComplete ? `Parallel ${activeParallelStep.id} completed` : action);
+    window.setTimeout(() => setCopyStatus(""), 1800);
   };
 
   const applyControlReviewResolution = (resolution: ControlRuntimeResolution) => {
@@ -1498,6 +1547,7 @@ export default function Home() {
   const isCurrentStepCompleteDisabled = useMemo(() => {
     if (!currentStep || !isFlowV14(selectedFlow)) return true;
     if (completedStepIds.includes(currentStep.id)) return true;
+    if (currentStep.decision_key) return true;
     if (currentStep.human_gate && !clearedHumanGateStepIds.includes(currentStep.id)) return true;
     if (isExternalHandoffStep(currentStep) && !clearedExternalHandoffStepIds.includes(currentStep.id)) return true;
     if (currentStep.type === "manual_execution" && !clearedManualExecutionStepIds.includes(currentStep.id)) return true;
@@ -2622,7 +2672,7 @@ export default function Home() {
                                   <input
                                     type="checkbox"
                                     checked={task.completed}
-                                    onChange={(e) => updateParallelTask(task.id, e.target.checked)}
+                                    onChange={(e) => markParallelTask(task.id, e.target.checked)}
                                   />
                                   <span>{task.target}</span>
                                 </label>
@@ -2858,26 +2908,35 @@ export default function Home() {
                             if (step) {
                               const result = applyDecisionStep(step, selectedFlow, decision as "pass" | "conditional" | "reject");
                               const nextState = result.state_to || flowRuntimeState.state;
-                              const canAdvanceDecision = decision === "pass";
-                              const nextCompletedStepIds = canAdvanceDecision && !completedStepIds.includes(step.id)
-                                ? [...completedStepIds, step.id]
-                                : completedStepIds;
-                              const nextStep = canAdvanceDecision
-                                ? findRuntimeCurrentStep(
-                                    selectedFlow,
-                                    { state: nextState, routeContext: flowRuntimeState.routeContext },
-                                    nextCompletedStepIds
-                                  )
-                                : step;
+                              const canAdvanceDecision = decision === "pass" || decision === "conditional";
+                              const routeSteps = getResolvedStepsForRoute(selectedFlow, flowRuntimeState.routeContext);
+                              const previousStep = findPreviousRouteStep(selectedFlow, step);
+                              const rollbackCompletedStepIds = previousStep
+                                ? completedStepIds.filter((stepId) => {
+                                    const index = routeSteps.findIndex((routeStep) => routeStep.id === stepId);
+                                    const previousIndex = routeSteps.findIndex((routeStep) => routeStep.id === previousStep.id);
+                                    return index >= 0 && index < previousIndex;
+                                  })
+                                : [];
+                              const nextCompletedStepIds = decision === "reject"
+                                ? rollbackCompletedStepIds
+                                : !completedStepIds.includes(step.id)
+                                  ? [...completedStepIds, step.id]
+                                  : completedStepIds;
+                              const nextRuntimeState = {
+                                state: nextState,
+                                routeContext: flowRuntimeState.routeContext,
+                              };
+                              const nextStep = findRuntimeCurrentStep(selectedFlow, nextRuntimeState, nextCompletedStepIds);
                               const newLogs = addActionLog(
                                 runtimeActionLogs,
-                                `Decision: ${decision}`,
+                                `Reviewer Decision: ${decision}`,
                                 flowRuntimeState.state,
                                 flowRuntimeState.routeContext,
                                 nextState,
                                 flowRuntimeState.routeContext,
                                 step.id,
-                                result.to ? `decision to: ${result.to}${canAdvanceDecision ? "" : " (advance blocked)"}` : undefined
+                                result.to ? `decision to: ${result.to}` : undefined
                               );
                               setFlowRuntimeState({
                                 state: nextState,
@@ -2965,21 +3024,7 @@ export default function Home() {
                         <input
                           type="checkbox"
                           checked={task.completed}
-                          onChange={(e) => {
-                            const updated = updateParallelTaskStatus(parallelRuntimeState, task.id, e.target.checked);
-                            setParallelRuntimeState(updated);
-                            const newLogs = addActionLog(
-                              runtimeActionLogs,
-                              e.target.checked ? `Parallel Task Completed: ${task.target}` : `Parallel Task Reopened: ${task.target}`,
-                              flowRuntimeState.state,
-                              flowRuntimeState.routeContext,
-                              flowRuntimeState.state,
-                              flowRuntimeState.routeContext,
-                              activeParallelStep.id,
-                              task.id
-                            );
-                            setRuntimeActionLogs(newLogs);
-                          }}
+                          onChange={(e) => markParallelTask(task.id, e.target.checked)}
                         />
                         <span>{task.target}</span>
                       </label>
@@ -3036,12 +3081,13 @@ export default function Home() {
               )}
 
               {/* 7. Guard Status */}
-              {(guardStatus.templateUnresolved || guardStatus.humanGateWaiting || guardStatus.externalHandoffWaiting || guardStatus.manualExecutionWaiting || guardStatus.joinIncomplete) && (
+              {(guardStatus.templateUnresolved || guardStatus.decisionWaiting || guardStatus.humanGateWaiting || guardStatus.externalHandoffWaiting || guardStatus.manualExecutionWaiting || guardStatus.joinIncomplete) && (
                 <div style={{ marginBottom: "16px", padding: "12px", backgroundColor: "#fff", borderRadius: "4px", border: "1px solid #ffcccc" }}>
                   <div style={{ fontSize: "0.95em", fontWeight: "bold", marginBottom: "8px", color: "#d32f2f" }}>🚫 Guard 状態</div>
                   <div style={{ display: "grid", gap: "6px", fontSize: "0.85em" }}>
                     {guardStatus.templateUnresolved && <div style={{ color: "#d32f2f" }}>⚠ Template Unresolved</div>}
                     {guardStatus.humanGateWaiting && <div style={{ color: "#f57c00" }}>⏸ Human Gate 待ち</div>}
+                    {guardStatus.decisionWaiting && <div style={{ color: "#f57c00" }}>Reviewer Decision waiting</div>}
                     {guardStatus.externalHandoffWaiting && (
                       <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                         <span style={{ color: "#f57c00" }}>⏸ External Handoff 待ち</span>
