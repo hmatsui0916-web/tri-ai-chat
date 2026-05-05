@@ -174,6 +174,63 @@ type ParallelRuntimeState = {
 
 type FeedbackLoopCounts = Partial<Record<ControlCause, number>>;
 
+type RoleName =
+  | "Human"
+  | "PM"
+  | "Designer"
+  | "Reviewer"
+  | "Integrator-S"
+  | "Worker"
+  | "Debugger"
+  | "Infra"
+  | "Integrator-C";
+
+type PromptRuntimeInputs = {
+  unit_id?: string;
+  human_goal?: string;
+  pm_decision?: string;
+  review_report?: string;
+  spec_content?: string;
+  packet_content?: string;
+  worker_code?: string;
+  debug_report?: string;
+  infra_result?: string;
+  human_execution_result?: string;
+  control_decision?: string;
+  rework_instruction?: string;
+  infra_test_plan?: string;
+  pm_approval_request?: string;
+  function_name?: string;
+  target?: string;
+};
+
+type RuntimeInputKey = keyof PromptRuntimeInputs;
+
+type RoleTemplateDefinition = {
+  scope: string;
+  mission: string;
+  variables: RuntimeInputKey[];
+  outputSchema: string;
+  taskInstruction: string;
+  prohibitions: string[];
+};
+
+type ValidationResult = {
+  ok: boolean;
+  errors?: string[];
+  warnings?: string[];
+};
+
+type PromptGenerationResult = {
+  ok: boolean;
+  stepId: string;
+  targetRoles: RoleName[];
+  promptByRole?: Partial<Record<RoleName, string>>;
+  externalHandoff?: boolean;
+  errors?: string[];
+  warnings?: string[];
+};
+
 type LoopLimitCheckResult =
   | {
       allowed: true;
@@ -626,6 +683,112 @@ function buildExternalHandoffText(step: ResolvedFlowStepV14): string {
     step.instruction || "(no instruction)",
   ].join("\n");
 }
+
+const ROLE_TEMPLATE_DEFINITIONS: Record<RoleName, RoleTemplateDefinition> = {
+  Human: {
+    scope: "Human Gate / Manual Execution",
+    mission: "Provide the human-side input, execution result, or approval result required by the current Flow step.",
+    variables: ["unit_id", "infra_test_plan", "pm_approval_request"],
+    outputSchema: "GoalInput / ExecutionResult / ApprovalResult",
+    taskInstruction: "Return only the human result requested by the current step.",
+    prohibitions: ["Do not invent missing runtime inputs.", "Do not advance the Flow without the explicit human result."],
+  },
+  PM: {
+    scope: "Decision",
+    mission: "Make the PM decision required by the current Flow state.",
+    variables: ["unit_id", "human_goal", "review_report", "control_decision", "human_execution_result"],
+    outputSchema: "{{unit_id}}_PMDecision_[Start/Final/Rework/Hold].md",
+    taskInstruction: "Produce a decision with target, judgment, reason, impact, and next action.",
+    prohibitions: ["Do not modify the Flow definition.", "Do not use inputs outside the provided variables."],
+  },
+  Designer: {
+    scope: "Specification",
+    mission: "Create or revise the Spec from the approved PM decision, reviewer reject report, or rework instruction.",
+    variables: ["unit_id", "pm_decision", "review_report", "rework_instruction"],
+    outputSchema: "{{unit_id}}_Spec.md",
+    taskInstruction: "Produce a Spec with Unit ID, Goal, Scope, Out of Scope, Inputs, Outputs, Constraints, and Acceptance Criteria.",
+    prohibitions: ["Do not add requirements not present in the provided inputs.", "Do not bypass Reviewer review."],
+  },
+  Reviewer: {
+    scope: "Review",
+    mission: "Review the provided Spec for consistency, risk, and verifiability.",
+    variables: ["unit_id", "spec_content"],
+    outputSchema: "{{unit_id}}_ReviewReport_[timestamp].md",
+    taskInstruction: "Return a ReviewReport with findings, risks, and Pass / Conditional / Reject judgment.",
+    prohibitions: ["Do not rewrite the Spec.", "Do not make implementation changes."],
+  },
+  "Integrator-S": {
+    scope: "Structure",
+    mission: "Convert the PM-approved Spec into the minimum Packet needed by Worker.",
+    variables: ["unit_id", "spec_content"],
+    outputSchema: "{{unit_id}}_Packet.md",
+    taskInstruction: "Produce a Packet with Unit, Goal, Target, Purpose, Inputs, Outputs, Constraints, Dependencies, Acceptance Criteria, and Implementation Skeleton.",
+    prohibitions: ["Do not change Role Template body.", "Do not add requirements outside the approved Spec.", "Do not proceed without PM approval guard."],
+  },
+  Worker: {
+    scope: "Implementation",
+    mission: "Implement only the Packet or ReworkInstruction supplied by the Flow Runtime.",
+    variables: ["unit_id", "packet_content", "rework_instruction", "function_name"],
+    outputSchema: "{{function_name}}_Code.[ext] and WorkReport",
+    taskInstruction: "Apply the requested implementation or rework in the VSCode workspace and report changed files plus verification.",
+    prohibitions: ["Do not call a Worker API.", "Do not infer undefined inputs.", "Do not modify Flow v1.4 JSON."],
+  },
+  Debugger: {
+    scope: "Debug Verification",
+    mission: "Verify Worker output against Packet and Spec without assuming success.",
+    variables: ["unit_id", "worker_code", "packet_content", "spec_content", "target"],
+    outputSchema: "{{target}}_DebugReport_[timestamp].md",
+    taskInstruction: "Report test points, observed behavior, expected behavior, and Pass / Fail judgment.",
+    prohibitions: ["Do not change code.", "Do not accept unverifiable behavior as pass."],
+  },
+  Infra: {
+    scope: "Environment Verification",
+    mission: "Prepare or evaluate environment and manual execution evidence without proposing code changes.",
+    variables: ["unit_id", "worker_code", "packet_content", "human_execution_result", "rework_instruction", "target"],
+    outputSchema: "{{target}}_TestPlan_[timestamp].md or {{target}}_TestResult_[timestamp].md",
+    taskInstruction: "Return environment steps, test result, or manual execution instructions required by the current step.",
+    prohibitions: ["Do not propose code changes.", "Do not bypass Human execution where the Flow requires it."],
+  },
+  "Integrator-C": {
+    scope: "Control",
+    mission: "Integrate Debugger, Infra, Worker, Packet, and Spec results into a ControlDecision or ReworkInstruction.",
+    variables: ["unit_id", "debug_report", "infra_result", "worker_code", "packet_content", "spec_content"],
+    outputSchema: "ControlDecision and ReworkInstruction as separate outputs",
+    taskInstruction: "Classify cause, decide Verified or feedback branch, and provide specific rework only when needed.",
+    prohibitions: ["Do not send direct feedback to Worker outside Integrator-C control.", "Do not skip verified transition conditions."],
+  },
+};
+
+const ROLE_REQUIRED_INPUTS: Record<RoleName, RuntimeInputKey[]> = {
+  Human: [],
+  PM: [],
+  Designer: [],
+  Reviewer: ["spec_content"],
+  "Integrator-S": ["spec_content"],
+  Worker: [],
+  Debugger: ["worker_code", "packet_content"],
+  Infra: [],
+  "Integrator-C": ["debug_report", "infra_result", "worker_code", "packet_content", "spec_content"],
+};
+
+const DEFAULT_PROMPT_RUNTIME_INPUTS: PromptRuntimeInputs = {
+  unit_id: "U-FLOW-11",
+  human_goal: "",
+  pm_decision: "",
+  review_report: "",
+  spec_content: "",
+  packet_content: "",
+  worker_code: "",
+  debug_report: "",
+  infra_result: "",
+  human_execution_result: "",
+  control_decision: "",
+  rework_instruction: "",
+  infra_test_plan: "",
+  pm_approval_request: "",
+  function_name: "",
+  target: "",
+};
 
 // Template reference resolution utilities
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -1086,6 +1249,271 @@ function addActionLog(
   return [...logs, log];
 }
 
+function isRoleName(value: unknown): value is RoleName {
+  return typeof value === "string" && value in ROLE_TEMPLATE_DEFINITIONS;
+}
+
+function parsePromptRuntimeInputs(text: string): {
+  ok: boolean;
+  value: PromptRuntimeInputs;
+  error?: string;
+} {
+  try {
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    if (!isPlainObject(parsed)) {
+      return { ok: false, value: {}, error: "Runtime outputs must be a JSON object." };
+    }
+
+    const value: PromptRuntimeInputs = {};
+    for (const key of Object.keys(DEFAULT_PROMPT_RUNTIME_INPUTS) as RuntimeInputKey[]) {
+      const raw = parsed[key];
+      if (raw === undefined || raw === null) continue;
+      value[key] = typeof raw === "string" ? raw : JSON.stringify(raw, null, 2);
+    }
+    return { ok: true, value };
+  } catch (err) {
+    return {
+      ok: false,
+      value: {},
+      error: err instanceof Error ? err.message : "Invalid runtime outputs JSON.",
+    };
+  }
+}
+
+function cleanPromptVariables(variables: PromptRuntimeInputs): PromptRuntimeInputs {
+  return Object.fromEntries(
+    Object.entries(variables).filter(([, value]) => typeof value === "string" && value.trim().length > 0)
+  ) as PromptRuntimeInputs;
+}
+
+function resolveTargetRoles(
+  step: ResolvedFlowStepV14,
+  flow: FlowDefinitionV14,
+  decision?: "pass" | "conditional" | "reject" | null
+): RoleName[] {
+  if (step.id === "main-05" || step.id === "fb-spec-04") return ["Integrator-S"];
+  if (step.id === "main-06" || step.id === "fb-impl-01" || step.id === "fb-spec-05") return ["Worker"];
+  if (step.id === "main-09") return ["PM"];
+  if (step.id === "fb-impl-02" || step.id === "fb-spec-06") return ["Debugger", "Infra"];
+  if (step.id === "fb-spec-03") return decision ? [applyDecisionStep(step, flow, decision).to].filter(isRoleName) : ["Reviewer"];
+
+  if (isReviewerDecisionStep(step)) {
+    return decision ? [applyDecisionStep(step, flow, decision).to].filter(isRoleName) : ["Reviewer"];
+  }
+
+  const to = Array.isArray(step.to) ? step.to : step.to ? [step.to] : [];
+  return to.filter(isRoleName);
+}
+
+function getRequiredInputsForStep(role: RoleName, step: ResolvedFlowStepV14): RuntimeInputKey[] {
+  if (role === "PM") {
+    if (step.id === "main-01") return ["human_goal"];
+    if (step.id === "main-09") return ["control_decision"];
+    return ["review_report"];
+  }
+
+  if (role === "Designer") {
+    if (step.id === "main-02") return ["pm_decision"];
+    if (step.id === "fb-spec-01") return ["rework_instruction"];
+    return ["review_report"];
+  }
+
+  if (role === "Worker") {
+    if (step.id === "main-06" || step.id === "fb-spec-05") return ["packet_content"];
+    if (step.id === "fb-impl-01") return ["rework_instruction"];
+    return ["packet_content"];
+  }
+
+  if (role === "Infra") {
+    if (step.id === "fb-env-01") return ["rework_instruction"];
+    if (step.id === "fb-env-03") return ["human_execution_result"];
+    return ["worker_code", "packet_content"];
+  }
+
+  if (role === "Human") {
+    if (step.id === "fb-env-02") return ["infra_test_plan"];
+    if (step.id === "main-10") return ["pm_approval_request"];
+    return [];
+  }
+
+  return ROLE_REQUIRED_INPUTS[role];
+}
+
+function buildPromptVariables(
+  role: RoleName,
+  step: ResolvedFlowStepV14,
+  inputs: PromptRuntimeInputs
+): PromptRuntimeInputs {
+  const template = ROLE_TEMPLATE_DEFINITIONS[role];
+  const allowed = new Set<RuntimeInputKey>(template.variables);
+  const required = getRequiredInputsForStep(role, step);
+  const variables: PromptRuntimeInputs = {};
+
+  for (const key of [...template.variables, ...required]) {
+    if (!allowed.has(key) && !required.includes(key)) continue;
+    const value = inputs[key];
+    if (typeof value === "string" && value.trim()) {
+      variables[key] = value;
+    }
+  }
+
+  return cleanPromptVariables(variables);
+}
+
+function validateRequiredInputs(
+  role: RoleName,
+  step: ResolvedFlowStepV14,
+  variables: PromptRuntimeInputs
+): ValidationResult {
+  const missing = getRequiredInputsForStep(role, step).filter((key) => !variables[key]?.trim());
+  return missing.length
+    ? { ok: false, errors: missing.map((key) => `${role} requires ${key} for ${step.id}.`) }
+    : { ok: true };
+}
+
+function assertPmApprovedForIntegratorS(
+  step: ResolvedFlowStepV14,
+  runtimeState: FlowRuntimeState,
+  pmApprovedSpec: boolean
+): ValidationResult {
+  const requiresGuard = step.id === "main-05" || step.id === "fb-spec-04";
+  if (!requiresGuard) return { ok: true };
+
+  const errors: string[] = [];
+  if (runtimeState.state !== "Reviewed") {
+    errors.push("Integrator-S requires current_state Reviewed.");
+  }
+  if (!pmApprovedSpec) {
+    errors.push("Integrator-S requires PM-approved Spec flag.");
+  }
+
+  return errors.length ? { ok: false, errors } : { ok: true };
+}
+
+function renderVariables(variables: PromptRuntimeInputs): string {
+  const entries = Object.entries(variables).filter(([, value]) => typeof value === "string" && value.trim());
+  if (!entries.length) return "Provided Variables:\n(none)";
+
+  return [
+    "Provided Variables:",
+    ...entries.flatMap(([key, value]) => [
+      "",
+      `### ${key}`,
+      "",
+      value,
+    ]),
+  ].join("\n");
+}
+
+function generateRolePrompt(
+  role: RoleName,
+  step: ResolvedFlowStepV14,
+  template: RoleTemplateDefinition,
+  variables: PromptRuntimeInputs,
+  flow: FlowDefinitionV14
+): string {
+  const binding = flow.role_bindings?.[role];
+  const outputProtocol = [
+    "Output Protocol:",
+    "- COPY Mode",
+    "- Return exactly one output block for this role.",
+    "- Show the output file name or artifact name.",
+  ];
+
+  if (role === "Worker") {
+    outputProtocol.push("- External handoff target: VSCode Copilot.");
+    outputProtocol.push("- Worker output return: paste_or_file_attach.");
+    outputProtocol.push("- No Worker API request is allowed.");
+  }
+
+  return [
+    `Role: ${role}`,
+    `Scope: ${template.scope}`,
+    "",
+    "Mission:",
+    template.mission,
+    "",
+    "Input Policy:",
+    "Use only the variables listed in Provided Variables. Missing or undefined inputs must not be inferred.",
+    "",
+    renderVariables(variables),
+    "",
+    "Task Instruction:",
+    template.taskInstruction,
+    "",
+    "Flow Step:",
+    `- step_id: ${step.id}`,
+    `- step_type: ${step.type || "(none)"}`,
+    `- route_context: ${step.route_context || "(none)"}`,
+    `- instruction: ${step.instruction || "(none)"}`,
+    binding ? `- role_binding: ${binding.type}${binding.column_id ? ` / ${binding.column_id}` : ""}` : "- role_binding: (none)",
+    "",
+    "Output Schema:",
+    template.outputSchema,
+    "",
+    "Prohibitions:",
+    ...template.prohibitions.map((item) => `- ${item}`),
+    "",
+    outputProtocol.join("\n"),
+  ].join("\n");
+}
+
+function generatePromptForCurrentStep(
+  flow: FlowDefinitionV14,
+  step: ResolvedFlowStepV14 | null,
+  runtimeState: FlowRuntimeState,
+  inputs: PromptRuntimeInputs,
+  pmApprovedSpec: boolean,
+  decision?: "pass" | "conditional" | "reject" | null
+): PromptGenerationResult {
+  if (!step) {
+    return { ok: false, stepId: "(none)", targetRoles: [], errors: ["No current step resolved."] };
+  }
+  if (step.template_unresolved) {
+    return { ok: false, stepId: step.id, targetRoles: [], errors: [`Unresolved template_ref: ${step.template_ref || "(missing)"}`] };
+  }
+
+  const guard = assertPmApprovedForIntegratorS(step, runtimeState, pmApprovedSpec);
+  if (!guard.ok) return { ok: false, stepId: step.id, targetRoles: [], errors: guard.errors };
+
+  const roles = resolveTargetRoles(step, flow, decision);
+  const promptByRole: Partial<Record<RoleName, string>> = {};
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  if (!roles.length) {
+    errors.push(`No target role resolved for ${step.id}.`);
+  }
+
+  if (isReviewerDecisionStep(step) && !decision) {
+    warnings.push("Reviewer decision is pending; select pass / conditional / reject before branch transition.");
+  }
+
+  for (const role of roles) {
+    const template = ROLE_TEMPLATE_DEFINITIONS[role];
+    const variables = buildPromptVariables(role, step, inputs);
+    const validation = validateRequiredInputs(role, step, variables);
+    if (!validation.ok) {
+      errors.push(...(validation.errors ?? []));
+      continue;
+    }
+    promptByRole[role] = generateRolePrompt(role, step, template, variables, flow);
+  }
+
+  if (errors.length) {
+    return { ok: false, stepId: step.id, targetRoles: roles, errors, warnings };
+  }
+
+  return {
+    ok: true,
+    stepId: step.id,
+    targetRoles: roles,
+    promptByRole,
+    externalHandoff: step.type === "external_handoff" || roles.includes("Worker"),
+    warnings,
+  };
+}
+
 function buildProviderHistories(
   columnHistories: Record<ColumnId, ColumnTurn[]>,
   newPrompt: string,
@@ -1182,6 +1610,9 @@ export default function Home() {
     joinIncomplete: false,
     maxIterationsReached: false,
   });
+  const [runtimeOutputsText, setRuntimeOutputsText] = useState(JSON.stringify(DEFAULT_PROMPT_RUNTIME_INPUTS, null, 2));
+  const [pmApprovedSpec, setPmApprovedSpec] = useState(false);
+  const [promptGenerationResult, setPromptGenerationResult] = useState<PromptGenerationResult | null>(null);
   const [showFlowRuntimePanel, setShowFlowRuntimePanel] = useState(true);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -1642,6 +2073,72 @@ export default function Home() {
       .catch(() => setCopyStatus("Failed to copy handoff text"));
   };
 
+  const generateCurrentStepPrompts = () => {
+    if (!isFlowV14(selectedFlow)) return;
+
+    const parsed = parsePromptRuntimeInputs(runtimeOutputsText);
+    if (!parsed.ok) {
+      const result: PromptGenerationResult = {
+        ok: false,
+        stepId: currentStep?.id ?? "(none)",
+        targetRoles: [],
+        errors: [parsed.error ?? "Invalid runtime outputs JSON."],
+      };
+      setPromptGenerationResult(result);
+      setCopyStatus("Prompt generation blocked");
+      window.setTimeout(() => setCopyStatus(""), 1800);
+      return;
+    }
+
+    const result = generatePromptForCurrentStep(
+      selectedFlow,
+      currentStep,
+      flowRuntimeState,
+      parsed.value,
+      pmApprovedSpec,
+      selectedDecision
+    );
+    setPromptGenerationResult(result);
+    setCopyStatus(result.ok ? `Generated prompt for ${result.stepId}` : "Prompt generation blocked");
+    window.setTimeout(() => setCopyStatus(""), 1800);
+  };
+
+  const copyGeneratedPrompts = async () => {
+    const promptByRole = promptGenerationResult?.promptByRole;
+    if (!promptByRole) return;
+
+    const text = Object.entries(promptByRole)
+      .map(([role, rolePrompt]) => `# ${role}\n\n${rolePrompt}`)
+      .join("\n\n---\n\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopyStatus("Generated prompts copied");
+      window.setTimeout(() => setCopyStatus(""), 1800);
+    } catch {
+      setCopyStatus("Failed to copy generated prompts");
+      window.setTimeout(() => setCopyStatus(""), 1800);
+    }
+  };
+
+  const stageGeneratedPromptsInComposer = () => {
+    if (!promptGenerationResult?.promptByRole || !isFlowV14(selectedFlow)) return;
+
+    const promptText = Object.entries(promptGenerationResult.promptByRole)
+      .map(([role, rolePrompt]) => `# ${role}\n\n${rolePrompt}`)
+      .join("\n\n---\n\n");
+    const roleColumnIds = promptGenerationResult.targetRoles
+      .map((role) => selectedFlow.role_bindings?.[role]?.column_id)
+      .filter((id): id is string => Boolean(id));
+
+    setPrompt(promptText);
+    if (roleColumnIds.length) {
+      setSendToAll(false);
+      setSendTargets(Object.fromEntries(columns.map((column) => [column.id, roleColumnIds.includes(column.id)])));
+    }
+    setCopyStatus(roleColumnIds.length ? `Staged for ${roleColumnIds.join(", ")}` : "Staged prompt; external handoff/manual target");
+    window.setTimeout(() => setCopyStatus(""), 1800);
+  };
+
   useEffect(() => {
     if (!routingEntries.length) return;
     const exists = routingEntries.some(
@@ -1671,6 +2168,8 @@ export default function Home() {
     setCompletedParallelStepIds([]);
     setLoggedTemplateUnresolvedStepIds([]);
     setCurrentStepId(null);
+    setPmApprovedSpec(false);
+    setPromptGenerationResult(null);
   }, [selectedFlowId]);
 
   useEffect(() => {
@@ -2845,6 +3344,100 @@ export default function Home() {
                       {getEffectiveMaxIterations(selectedFlow, "environment") ? ` / ${getEffectiveMaxIterations(selectedFlow, "environment")}` : ""}
                     </div>
                   </div>
+                </div>
+              </div>
+
+              {/* U-FLOW-11 Prompt Generation */}
+              <div style={{ marginBottom: "16px", padding: "12px", backgroundColor: "#fff", borderRadius: "4px", border: "1px solid #cce5ff" }}>
+                <div style={{ fontSize: "0.95em", fontWeight: "bold", marginBottom: "8px" }}>U-FLOW-11 Prompt Runtime</div>
+                <div style={{ display: "grid", gap: "10px" }}>
+                  <div style={{ fontSize: "0.85em", color: "#333", lineHeight: "1.6" }}>
+                    <div><strong>Current Step:</strong> {currentStep?.id || "(none)"}</div>
+                    <div><strong>Resolved Role(s):</strong> {currentStep ? resolveTargetRoles(currentStep, selectedFlow, selectedDecision).join(", ") || "(none)" : "(none)"}</div>
+                    <div><strong>External Handoff:</strong> {currentStep && isExternalHandoffStep(currentStep) ? "manual VSCode Copilot handoff" : "no"}</div>
+                  </div>
+                  <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.85em", cursor: "pointer" }}>
+                    <input
+                      type="checkbox"
+                      checked={pmApprovedSpec}
+                      onChange={(e) => setPmApprovedSpec(e.target.checked)}
+                    />
+                    <span>PM-approved Spec guard for Integrator-S</span>
+                  </label>
+                  <label style={{ display: "grid", gap: "4px", fontSize: "0.85em" }}>
+                    Runtime outputs / allowed inputs JSON
+                    <textarea
+                      value={runtimeOutputsText}
+                      onChange={(e) => setRuntimeOutputsText(e.target.value)}
+                      spellCheck={false}
+                      style={{
+                        width: "100%",
+                        minHeight: "150px",
+                        resize: "vertical",
+                        padding: "8px",
+                        border: "1px solid #d1d5db",
+                        borderRadius: "8px",
+                        fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                        fontSize: "12px",
+                        lineHeight: 1.45,
+                      }}
+                    />
+                  </label>
+                  <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                    <button
+                      type="button"
+                      onClick={generateCurrentStepPrompts}
+                      style={{ padding: "6px 12px", fontSize: "0.85em", backgroundColor: "#228be6", color: "#fff", border: "none", borderRadius: "4px", cursor: "pointer" }}
+                    >
+                      Generate Prompt
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void copyGeneratedPrompts()}
+                      disabled={!promptGenerationResult?.promptByRole}
+                      style={{ padding: "6px 12px", fontSize: "0.85em", backgroundColor: promptGenerationResult?.promptByRole ? "#495057" : "#e9ecef", color: promptGenerationResult?.promptByRole ? "#fff" : "#666", border: "none", borderRadius: "4px", cursor: promptGenerationResult?.promptByRole ? "pointer" : "not-allowed" }}
+                    >
+                      Copy Prompt
+                    </button>
+                    <button
+                      type="button"
+                      onClick={stageGeneratedPromptsInComposer}
+                      disabled={!promptGenerationResult?.promptByRole || promptGenerationResult.externalHandoff}
+                      style={{ padding: "6px 12px", fontSize: "0.85em", backgroundColor: promptGenerationResult?.promptByRole && !promptGenerationResult.externalHandoff ? "#51cf66" : "#e9ecef", color: promptGenerationResult?.promptByRole && !promptGenerationResult.externalHandoff ? "#fff" : "#666", border: "none", borderRadius: "4px", cursor: promptGenerationResult?.promptByRole && !promptGenerationResult.externalHandoff ? "pointer" : "not-allowed" }}
+                    >
+                      Stage to Role Columns
+                    </button>
+                  </div>
+                  {promptGenerationResult && (
+                    <div style={{ display: "grid", gap: "8px", fontSize: "0.85em" }}>
+                      <div>
+                        <strong>Result:</strong> {promptGenerationResult.ok ? "ok" : "blocked"} / step {promptGenerationResult.stepId} / roles {promptGenerationResult.targetRoles.join(", ") || "(none)"}
+                      </div>
+                      {promptGenerationResult.externalHandoff && (
+                        <div style={{ padding: "8px", border: "1px solid #ffd8a8", borderRadius: "4px", backgroundColor: "#fff9db", color: "#7c4a00" }}>
+                          Worker handoff is manual. Copy the generated prompt for VSCode Copilot; no API request will be sent.
+                        </div>
+                      )}
+                      {!!promptGenerationResult.errors?.length && (
+                        <div style={{ color: "#b91c1c", whiteSpace: "pre-wrap" }}>
+                          {promptGenerationResult.errors.join("\n")}
+                        </div>
+                      )}
+                      {!!promptGenerationResult.warnings?.length && (
+                        <div style={{ color: "#9c5a00", whiteSpace: "pre-wrap" }}>
+                          {promptGenerationResult.warnings.join("\n")}
+                        </div>
+                      )}
+                      {promptGenerationResult.promptByRole && Object.entries(promptGenerationResult.promptByRole).map(([role, rolePrompt]) => (
+                        <details key={role} open={Object.keys(promptGenerationResult.promptByRole ?? {}).length === 1}>
+                          <summary style={{ cursor: "pointer", fontWeight: 700 }}>{role} Prompt</summary>
+                          <pre style={{ margin: "8px 0 0", padding: "10px", maxHeight: "260px", overflow: "auto", whiteSpace: "pre-wrap", backgroundColor: "#f8f9fa", border: "1px solid #e5e7eb", borderRadius: "6px" }}>
+                            {rolePrompt}
+                          </pre>
+                        </details>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
 
