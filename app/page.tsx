@@ -1826,7 +1826,8 @@ export default function Home() {
     }
 
     if (isReviewerDecisionStep(step)) {
-      if (!selectedDecision) {
+      const decision = selectedDecision;
+      if (!decision) {
         setCopyStatus(`Decision is still waiting for ${step.id}`);
         window.setTimeout(() => setCopyStatus(""), 1800);
         return;
@@ -1834,7 +1835,7 @@ export default function Home() {
 
       if (!isFlowV14(selectedFlow)) return;
 
-      const result = applyDecisionStep(step, selectedFlow, selectedDecision);
+      const result = applyDecisionStep(step, selectedFlow, decision);
       const nextState = result.state_to || flowRuntimeState.state;
       const routeSteps = getResolvedStepsForRoute(selectedFlow, flowRuntimeState.routeContext);
       const previousStep = findPreviousRouteStep(selectedFlow, step);
@@ -1845,7 +1846,7 @@ export default function Home() {
             return index >= 0 && index < previousIndex;
           })
         : [];
-      const nextCompletedStepIds = selectedDecision === "reject"
+      const nextCompletedStepIds = decision === "reject"
         ? rollbackCompletedStepIds
         : [...completedStepIds, step.id];
       const nextRuntimeState = {
@@ -1855,7 +1856,7 @@ export default function Home() {
       const nextStep = findRuntimeCurrentStep(selectedFlow, nextRuntimeState, nextCompletedStepIds);
       const newLogs = addActionLog(
         runtimeActionLogs,
-        `Reviewer Decision Completed: ${selectedDecision}`,
+        `Reviewer Decision Completed: ${decision}`,
         flowRuntimeState.state,
         flowRuntimeState.routeContext,
         nextState,
@@ -1873,8 +1874,9 @@ export default function Home() {
       setCompletedStepIds(nextCompletedStepIds);
       setCurrentStepId(nextStep?.id ?? null);
       setLastTransitionTo(result.to || null);
+      setSelectedDecision(null);
       setRuntimeActionLogs(newLogs);
-      setCopyStatus(`Decision: ${selectedDecision} completed`);
+      setCopyStatus(`Decision: ${decision} completed`);
       window.setTimeout(() => setCopyStatus(""), 1800);
       return;
     }
@@ -1943,7 +1945,10 @@ export default function Home() {
     });
     setCompletedStepIds(nextCompletedStepIds);
     setCurrentStepId(nextStep?.id ?? null);
+    setSelectedDecision(null);
     setRuntimeActionLogs(newLogs);
+    setCopyStatus(`Step ${step.id} completed`);
+    window.setTimeout(() => setCopyStatus(""), 1800);
   };
 
   const applyParallelStep = () => {
@@ -2021,6 +2026,7 @@ export default function Home() {
         routeContext: resolution.route_context_reset ?? flowRuntimeState.routeContext,
       });
       setCurrentStepId(resolution.nextStepId ?? null);
+      setSelectedDecision(null);
 
       if (shouldResetLoopCountsOnResolution(resolution)) {
         setFeedbackLoopCounts(createEmptyFeedbackLoopCounts());
@@ -2068,6 +2074,7 @@ export default function Home() {
         routeContext: resolution.route_context ?? flowRuntimeState.routeContext,
       });
       setCurrentStepId(resolution.firstStepId ?? null);
+      setSelectedDecision(null);
       setRuntimeActionLogs(newLogs);
       return;
     }
@@ -2077,7 +2084,7 @@ export default function Home() {
     if (!currentStep || !isFlowV14(selectedFlow)) return true;
     if (currentStep.template_unresolved) return true;
     if (completedStepIds.includes(currentStep.id)) return true;
-    if (isReviewerDecisionStep(currentStep)) return true;
+    if (isReviewerDecisionStep(currentStep)) return !selectedDecision;
     if (currentStep.human_gate && !clearedHumanGateStepIds.includes(currentStep.id)) return true;
     if (isExternalHandoffStep(currentStep) && !clearedExternalHandoffStepIds.includes(currentStep.id)) return true;
     if (currentStep.type === "manual_execution" && !clearedManualExecutionStepIds.includes(currentStep.id)) return true;
@@ -2101,6 +2108,7 @@ export default function Home() {
     clearedManualExecutionStepIds,
     isParallelReadyToAdvance,
     completedParallelStepIds,
+    selectedDecision,
   ]);
 
   const copyStepText = (step: ResolvedFlowStepV14) => {
@@ -3506,6 +3514,7 @@ export default function Home() {
                         setLoggedTemplateUnresolvedStepIds([]);
                         setFeedbackLoopCounts(createEmptyFeedbackLoopCounts());
                         setParallelRuntimeState(null);
+                        setSelectedDecision(null);
                         setRuntimeActionLogs(newLogs);
                         setCopyStatus("Runtime をリセットしました。");
                         window.setTimeout(() => setCopyStatus(""), 1800);
@@ -3514,12 +3523,10 @@ export default function Home() {
                     >
                       ↻ Runtime Reset
                     </button>
-                    {currentStep && !currentStep.template_unresolved && !isReviewerDecisionStep(currentStep) && !isParallelStep(currentStep) && currentStep.type !== "join" && (
+                    {currentStep && !currentStep.template_unresolved && !isParallelStep(currentStep) && currentStep.type !== "join" && (
                       <button
                         onClick={() => {
                           applyResolvedStep(currentStep);
-                          setCopyStatus(`Step ${currentStep.id} completed`);
-                          setTimeout(() => setCopyStatus(""), 1800);
                         }}
                         disabled={isCurrentStepCompleteDisabled}
                         style={{
@@ -3595,7 +3602,7 @@ export default function Home() {
                 <div style={{ marginBottom: "16px", padding: "12px", backgroundColor: "#fff", borderRadius: "4px", border: "1px solid #cce5ff" }}>
                   <div style={{ fontSize: "0.95em", fontWeight: "bold", marginBottom: "8px" }}>🎯 Decision Control</div>
                   <div style={{ marginBottom: "8px", fontSize: "0.85em", color: "#555" }}>
-                    decision_key: review_decision / Complete is blocked until a decision is selected.
+                    decision_key: review_decision / Select a decision, then complete the step.
                   </div>
                   <div style={{ display: "grid", gap: "10px" }}>
                     <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
@@ -3603,56 +3610,9 @@ export default function Home() {
                         <button
                           key={decision}
                           onClick={() => {
-                            const step = isReviewerDecisionStep(currentStep) ? currentStep : undefined;
-                            if (step) {
-                              const result = applyDecisionStep(step, selectedFlow, decision as "pass" | "conditional" | "reject");
-                              const nextState = result.state_to || flowRuntimeState.state;
-                              const routeSteps = getResolvedStepsForRoute(selectedFlow, flowRuntimeState.routeContext);
-                              const previousStep = findPreviousRouteStep(selectedFlow, step);
-                              const rollbackCompletedStepIds = previousStep
-                                ? completedStepIds.filter((stepId) => {
-                                    const index = routeSteps.findIndex((routeStep) => routeStep.id === stepId);
-                                    const previousIndex = routeSteps.findIndex((routeStep) => routeStep.id === previousStep.id);
-                                    return index >= 0 && index < previousIndex;
-                                  })
-                                : [];
-                              const nextCompletedStepIds = decision === "reject"
-                                ? rollbackCompletedStepIds
-                                : !completedStepIds.includes(step.id)
-                                  ? [...completedStepIds, step.id]
-                                  : completedStepIds;
-                              const nextRuntimeState = {
-                                state: nextState,
-                                routeContext: flowRuntimeState.routeContext,
-                              };
-                              const nextStep = findRuntimeCurrentStep(selectedFlow, nextRuntimeState, nextCompletedStepIds);
-                              const newLogs = addActionLog(
-                                runtimeActionLogs,
-                                `Reviewer Decision: ${decision}`,
-                                flowRuntimeState.state,
-                                flowRuntimeState.routeContext,
-                                nextState,
-                                flowRuntimeState.routeContext,
-                                step.id,
-                                [
-                                  "decision_key: review_decision",
-                                  result.to ? `to: ${result.to}` : undefined,
-                                  result.state_to ? `state_to: ${result.state_to}` : undefined,
-                                  nextStep?.id ? `next: ${nextStep.id}` : undefined,
-                                ].filter(Boolean).join("; ")
-                              );
-                              setFlowRuntimeState({
-                                state: nextState,
-                                routeContext: flowRuntimeState.routeContext,
-                              });
-                              setCompletedStepIds(nextCompletedStepIds);
-                              setCurrentStepId(nextStep?.id ?? null);
-                              setLastTransitionTo(result.to || null);
-                              setSelectedDecision(decision as "pass" | "conditional" | "reject");
-                              setRuntimeActionLogs(newLogs);
-                              setCopyStatus(`Decision: ${decision} selected`);
-                              setTimeout(() => setCopyStatus(""), 1800);
-                            }
+                            setSelectedDecision(decision as "pass" | "conditional" | "reject");
+                            setCopyStatus(`Decision selected: ${decision}`);
+                            setTimeout(() => setCopyStatus(""), 1800);
                           }}
                           style={{
                             padding: "6px 12px",
