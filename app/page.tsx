@@ -753,6 +753,67 @@ function getAllResolvedFlowSteps(flow: FlowDefinitionV14): ResolvedFlowStepV14[]
   return [...main, ...branchSteps].filter((step) => !step.template_unresolved);
 }
 
+function getResolvedStepsForRoute(
+  flow: FlowDefinitionV14,
+  routeContext: string
+): ResolvedFlowStepV14[] {
+  if (routeContext === "main") {
+    return getResolvedMainFlow(flow).filter((step) => !step.template_unresolved);
+  }
+
+  const branchKey = Object.keys(flow.feedback_flow?.branches ?? {}).find((key) => {
+    const branch = flow.feedback_flow?.branches?.[key];
+    return isPlainObject(branch) && branch.route_context === routeContext;
+  });
+
+  if (!branchKey) return [];
+
+  return getResolvedFeedbackBranchFlow(flow, branchKey).filter((step) => !step.template_unresolved);
+}
+
+function findStepById(
+  flow: FlowDefinitionV14,
+  stepId: string | null
+): ResolvedFlowStepV14 | null {
+  if (!stepId) return null;
+  return getAllResolvedFlowSteps(flow).find((step) => step.id === stepId) ?? null;
+}
+
+function findRuntimeCurrentStep(
+  flow: FlowDefinitionV14,
+  runtimeState: FlowRuntimeState,
+  completedStepIds: string[]
+): ResolvedFlowStepV14 | null {
+  const completed = new Set(completedStepIds);
+  const routed = resolveRouting(flow, runtimeState.state, runtimeState.routeContext).steps;
+  const routedCandidate = routed.find((step) => !completed.has(step.id));
+  if (routedCandidate) return routedCandidate;
+
+  const routeSteps = getResolvedStepsForRoute(flow, runtimeState.routeContext);
+  const lastCompletedIndex = routeSteps.reduce((lastIndex, step, index) => {
+    return completed.has(step.id) ? index : lastIndex;
+  }, -1);
+
+  return routeSteps.slice(lastCompletedIndex + 1).find((step) => !completed.has(step.id)) ?? null;
+}
+
+function getNextStepsAfterCurrentStep(
+  flow: FlowDefinitionV14,
+  currentStep: ResolvedFlowStepV14 | null,
+  completedStepIds: string[]
+): ResolvedFlowStepV14[] {
+  if (!currentStep) return [];
+
+  const routeContext = currentStep.route_context || "main";
+  const completed = new Set(completedStepIds);
+  const routeSteps = getResolvedStepsForRoute(flow, routeContext);
+  const currentIndex = routeSteps.findIndex((step) => step.id === currentStep.id);
+  if (currentIndex < 0) return [];
+
+  const nextStep = routeSteps.slice(currentIndex + 1).find((step) => !completed.has(step.id));
+  return nextStep ? [nextStep] : [];
+}
+
 function isSpecialFlowRef(nextId: string): boolean {
   return (
     nextId === "feedback_flow.branches" ||
@@ -1072,6 +1133,8 @@ export default function Home() {
   const [lastTransitionTo, setLastTransitionTo] = useState<string | null>(null);
   // U-FLOW-08R1: Extended runtime state
   const [currentStepId, setCurrentStepId] = useState<string | null>(null);
+  const [completedStepIds, setCompletedStepIds] = useState<string[]>([]);
+  const [clearedHumanGateStepIds, setClearedHumanGateStepIds] = useState<string[]>([]);
   const [selectedDecision, setSelectedDecision] = useState<"pass" | "conditional" | "reject" | null>(null);
   const [verifiedConditionInputs, setVerifiedConditionInputs] = useState<VerifiedConditionInputs>({
     debuggerPass: false,
@@ -1148,48 +1211,31 @@ export default function Home() {
     });
   }, [selectedFlow, routingResolution, controlVerified, controlCause, codeChangeRequired, reclassifyCause, verifiedConditionInputs]);
 
+  const currentStep = useMemo(() => {
+    if (!isFlowV14(selectedFlow)) return null;
+    const selectedStep = findStepById(selectedFlow, currentStepId);
+    if (selectedStep && !completedStepIds.includes(selectedStep.id)) {
+      return selectedStep;
+    }
+    return findRuntimeCurrentStep(selectedFlow, flowRuntimeState, completedStepIds);
+  }, [selectedFlow, currentStepId, flowRuntimeState, completedStepIds]);
+
   const flowRuntimeNextSteps = useMemo(() => {
     if (!isFlowV14(selectedFlow)) return [] as ResolvedFlowStepV14[];
-    
-    let routingState = flowRuntimeState.state;
-    let routingRouteContext = flowRuntimeState.routeContext;
-    
-    // If currentStepId is set, resolve next steps from the state after current step completion
-    if (currentStepId) {
-      const currentStep = selectedFlow.main_flow?.find(step => step.id === currentStepId);
-      if (currentStep && typeof currentStep.state_to === 'string') {
-        routingState = currentStep.state_to;
-        // Keep route_context the same unless specified
-      }
-    }
-    
-    const runtimeRouting = resolveRouting(selectedFlow, routingState, routingRouteContext);
-    return runtimeRouting?.steps ?? [];
-  }, [selectedFlow, flowRuntimeState, currentStepId]);
+    return getNextStepsAfterCurrentStep(selectedFlow, currentStep, completedStepIds);
+  }, [selectedFlow, currentStep, completedStepIds]);
+
+  const runtimeExecutableSteps = useMemo(() => {
+    return currentStep ? [currentStep] : [];
+  }, [currentStep]);
 
   useEffect(() => {
-    // Initialize currentStepId when flow changes
-    if (isFlowV14(selectedFlow)) {
-      // Set currentStepId to the first step in main_flow
-      const firstStep = selectedFlow.main_flow?.[0];
-      if (firstStep && firstStep.id) {
-        setCurrentStepId(firstStep.id);
-      } else {
-        setCurrentStepId(null);
-      }
-    } else {
-      setCurrentStepId(null);
-    }
-  }, [selectedFlow]);
-
-  const currentStep = useMemo(() => {
-    if (!isFlowV14(selectedFlow) || !currentStepId) return null;
-    return selectedFlow.main_flow?.find(step => step.id === currentStepId) || null;
-  }, [selectedFlow, currentStepId]);
+    setCurrentStepId(currentStep?.id ?? null);
+  }, [currentStep?.id]);
 
   const activeParallelStep = useMemo(() => {
-    return flowRuntimeNextSteps.find(isParallelStep);
-  }, [flowRuntimeNextSteps]);
+    return currentStep && isParallelStep(currentStep) ? currentStep : undefined;
+  }, [currentStep]);
 
   useEffect(() => {
     if (!activeParallelStep) {
@@ -1205,12 +1251,8 @@ export default function Home() {
   const isParallelReadyToAdvance = parallelRuntimeState ? isParallelComplete(parallelRuntimeState) : false;
 
   useEffect(() => {
-    const currentStep = currentStepId
-      ? flowRuntimeNextSteps.find((step) => step.id === currentStepId)
-      : flowRuntimeNextSteps[0];
-
     const templateUnresolved = flowRuntimeNextSteps.some((step) => step.template_unresolved === true);
-    const humanGateWaiting = !!currentStep?.human_gate;
+    const humanGateWaiting = !!currentStep?.human_gate && !clearedHumanGateStepIds.includes(currentStep.id);
     const externalHandoffWaiting = currentStep ? isExternalHandoffStep(currentStep) : false;
     const manualExecutionWaiting = currentStep?.type === "manual_execution";
     const joinIncomplete = !!activeParallelStep && !isParallelReadyToAdvance;
@@ -1236,17 +1278,37 @@ export default function Home() {
       maxIterationsReached,
       details: maxIterationsReached ? maxIterationsDetails : undefined,
     });
-  }, [flowRuntimeNextSteps, currentStepId, activeParallelStep, isParallelReadyToAdvance, feedbackLoopCounts, selectedFlow]);
+  }, [flowRuntimeNextSteps, currentStep, clearedHumanGateStepIds, activeParallelStep, isParallelReadyToAdvance, feedbackLoopCounts, selectedFlow]);
 
   const applyResolvedStep = (
     step: ResolvedFlowStepV14,
     options?: { stateOverride?: string; routeContextOverride?: string }
   ) => {
+    if (completedStepIds.includes(step.id)) {
+      setCopyStatus(`Step ${step.id} is already completed`);
+      window.setTimeout(() => setCopyStatus(""), 1800);
+      return;
+    }
+
+    if (step.human_gate && !clearedHumanGateStepIds.includes(step.id)) {
+      setCopyStatus(`Human Gate is still waiting for ${step.id}`);
+      window.setTimeout(() => setCopyStatus(""), 1800);
+      return;
+    }
+
     const newState = options?.stateOverride ?? step.state_to ?? flowRuntimeState.state;
     const newRouteContext = options?.routeContextOverride ?? step.route_context ?? flowRuntimeState.routeContext;
+    const nextCompletedStepIds = [...completedStepIds, step.id];
+    const nextStep = isFlowV14(selectedFlow)
+      ? findRuntimeCurrentStep(
+          selectedFlow,
+          { state: newState, routeContext: newRouteContext },
+          nextCompletedStepIds
+        )
+      : null;
     const newLogs = addActionLog(
       runtimeActionLogs,
-      `Step: ${step.id}`,
+      `Step Completed: ${step.id}`,
       flowRuntimeState.state,
       flowRuntimeState.routeContext,
       newState,
@@ -1258,7 +1320,8 @@ export default function Home() {
       state: newState,
       routeContext: newRouteContext,
     });
-    setCurrentStepId(step.id);
+    setCompletedStepIds(nextCompletedStepIds);
+    setCurrentStepId(nextStep?.id ?? null);
     setRuntimeActionLogs(newLogs);
 
     // Handle loop increment on cause transition
@@ -1302,6 +1365,7 @@ export default function Home() {
         state: resolution.state_to ?? flowRuntimeState.state,
         routeContext: resolution.route_context_reset ?? flowRuntimeState.routeContext,
       });
+      setCurrentStepId(resolution.nextStepId ?? null);
 
       if (shouldResetLoopCountsOnResolution(resolution)) {
         setFeedbackLoopCounts(createEmptyFeedbackLoopCounts());
@@ -1339,6 +1403,7 @@ export default function Home() {
         state: resolution.state_rollback_to ?? flowRuntimeState.state,
         routeContext: resolution.route_context ?? flowRuntimeState.routeContext,
       });
+      setCurrentStepId(resolution.firstStepId ?? null);
       setRuntimeActionLogs(newLogs);
       return;
     }
@@ -1376,6 +1441,9 @@ export default function Home() {
     setFlowRuntimeState(DEFAULT_FLOW_RUNTIME_STATE);
     setParallelRuntimeState(null);
     setFeedbackLoopCounts(createEmptyFeedbackLoopCounts());
+    setCompletedStepIds([]);
+    setClearedHumanGateStepIds([]);
+    setCurrentStepId(null);
   }, [selectedFlowId]);
 
   useEffect(() => {
@@ -2462,7 +2530,7 @@ export default function Home() {
                         </div>
                       ) : null}
 
-                      {flowRuntimeNextSteps.filter((step) => !isParallelStep(step)).map((step) => (
+                      {runtimeExecutableSteps.filter((step) => !isParallelStep(step)).map((step) => (
                         <div key={step.id} style={{ border: "1px solid #ddd", borderRadius: "6px", padding: "8px" }}>
                           <div style={{ fontWeight: 600 }}>{getStepDisplayName(step)}</div>
                           <div style={{ fontSize: "0.9em", color: "#555" }}>
@@ -2570,6 +2638,8 @@ export default function Home() {
                         );
                         setFlowRuntimeState({ state: "Draft", routeContext: "main" });
                         setCurrentStepId(null);
+                        setCompletedStepIds([]);
+                        setClearedHumanGateStepIds([]);
                         setFeedbackLoopCounts(createEmptyFeedbackLoopCounts());
                         setParallelRuntimeState(null);
                         setRuntimeActionLogs(newLogs);
@@ -2583,28 +2653,20 @@ export default function Home() {
                     {currentStep && (
                       <button
                         onClick={() => {
-                          // Complete current step and advance
-                          const newLogs = addActionLog(
-                            runtimeActionLogs,
-                            `Step Completed: ${currentStep.id}`,
-                            flowRuntimeState.state,
-                            flowRuntimeState.routeContext,
-                            currentStep.state_to || flowRuntimeState.state,
-                            flowRuntimeState.routeContext,
-                            currentStep.id
-                          );
-                          setFlowRuntimeState({
-                            state: currentStep.state_to || flowRuntimeState.state,
-                            routeContext: flowRuntimeState.routeContext,
-                          });
-                          // Set next step as current
-                          const nextStep = flowRuntimeNextSteps[0];
-                          setCurrentStepId(nextStep?.id || null);
-                          setRuntimeActionLogs(newLogs);
+                          applyResolvedStep(currentStep);
                           setCopyStatus(`Step ${currentStep.id} completed`);
                           setTimeout(() => setCopyStatus(""), 1800);
                         }}
-                        style={{ padding: "6px 12px", fontSize: "0.85em", backgroundColor: "#51cf66", color: "#fff", border: "none", borderRadius: "4px", cursor: "pointer" }}
+                        disabled={completedStepIds.includes(currentStep.id) || (currentStep.human_gate && !clearedHumanGateStepIds.includes(currentStep.id))}
+                        style={{
+                          padding: "6px 12px",
+                          fontSize: "0.85em",
+                          backgroundColor: completedStepIds.includes(currentStep.id) || (currentStep.human_gate && !clearedHumanGateStepIds.includes(currentStep.id)) ? "#e9ecef" : "#51cf66",
+                          color: completedStepIds.includes(currentStep.id) || (currentStep.human_gate && !clearedHumanGateStepIds.includes(currentStep.id)) ? "#666" : "#fff",
+                          border: "none",
+                          borderRadius: "4px",
+                          cursor: completedStepIds.includes(currentStep.id) || (currentStep.human_gate && !clearedHumanGateStepIds.includes(currentStep.id)) ? "not-allowed" : "pointer",
+                        }}
                       >
                         ✓ Complete {currentStep.id}
                       </button>
@@ -2621,6 +2683,9 @@ export default function Home() {
                             flowRuntimeState.routeContext,
                             currentStep.id,
                             "Human gate cleared"
+                          );
+                          setClearedHumanGateStepIds((current) =>
+                            current.includes(currentStep.id) ? current : [...current, currentStep.id]
                           );
                           setRuntimeActionLogs(newLogs);
                           setCopyStatus("Human Gate completed");
@@ -2662,7 +2727,7 @@ export default function Home() {
               </div>
 
               {/* 4. Decision & Cause Controls */}
-              {flowRuntimeNextSteps.some((s) => s.decision_key === "review_decision") && (
+              {currentStep?.decision_key === "review_decision" && (
                 <div style={{ marginBottom: "16px", padding: "12px", backgroundColor: "#fff", borderRadius: "4px", border: "1px solid #cce5ff" }}>
                   <div style={{ fontSize: "0.95em", fontWeight: "bold", marginBottom: "8px" }}>🎯 Decision Control</div>
                   <div style={{ display: "grid", gap: "10px" }}>
@@ -2671,23 +2736,34 @@ export default function Home() {
                         <button
                           key={decision}
                           onClick={() => {
-                            const step = flowRuntimeNextSteps.find((s) => s.decision_key === "review_decision");
+                            const step = currentStep?.decision_key === "review_decision" ? currentStep : undefined;
                             if (step) {
                               const result = applyDecisionStep(step, selectedFlow, decision as "pass" | "conditional" | "reject");
+                              const nextState = result.state_to || flowRuntimeState.state;
+                              const nextCompletedStepIds = completedStepIds.includes(step.id)
+                                ? completedStepIds
+                                : [...completedStepIds, step.id];
+                              const nextStep = findRuntimeCurrentStep(
+                                selectedFlow,
+                                { state: nextState, routeContext: flowRuntimeState.routeContext },
+                                nextCompletedStepIds
+                              );
                               const newLogs = addActionLog(
                                 runtimeActionLogs,
                                 `Decision: ${decision}`,
                                 flowRuntimeState.state,
                                 flowRuntimeState.routeContext,
-                                result.state_to || flowRuntimeState.state,
+                                nextState,
                                 flowRuntimeState.routeContext,
                                 step.id,
                                 result.to ? `decision to: ${result.to}` : undefined
                               );
                               setFlowRuntimeState({
-                                state: result.state_to || flowRuntimeState.state,
+                                state: nextState,
                                 routeContext: flowRuntimeState.routeContext,
                               });
+                              setCompletedStepIds(nextCompletedStepIds);
+                              setCurrentStepId(nextStep?.id ?? null);
                               setLastTransitionTo(result.to || null);
                               setSelectedDecision(decision as "pass" | "conditional" | "reject");
                               setRuntimeActionLogs(newLogs);
