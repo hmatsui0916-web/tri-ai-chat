@@ -25,6 +25,12 @@ type ColumnTurn = {
   done: boolean;
 };
 
+type StagedColumnPrompt = {
+  role: RoleName;
+  stepId: string;
+  prompt: string;
+};
+
 type SelectedReference = {
   key: ColumnId;
   id: string;
@@ -1613,6 +1619,7 @@ export default function Home() {
   const [runtimeOutputsText, setRuntimeOutputsText] = useState(JSON.stringify(DEFAULT_PROMPT_RUNTIME_INPUTS, null, 2));
   const [pmApprovedSpec, setPmApprovedSpec] = useState(false);
   const [promptGenerationResult, setPromptGenerationResult] = useState<PromptGenerationResult | null>(null);
+  const [stagedPromptsByColumn, setStagedPromptsByColumn] = useState<Partial<Record<ColumnId, StagedColumnPrompt[]>>>({});
   const [showFlowRuntimePanel, setShowFlowRuntimePanel] = useState(true);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -2174,14 +2181,44 @@ export default function Home() {
     const promptText = Object.entries(promptGenerationResult.promptByRole)
       .map(([role, rolePrompt]) => `# ${role}\n\n${rolePrompt}`)
       .join("\n\n---\n\n");
-    const roleColumnIds = promptGenerationResult.targetRoles
-      .map((role) => selectedFlow.role_bindings?.[role]?.column_id)
-      .filter((id): id is string => Boolean(id));
+    const stagedByColumn: Partial<Record<ColumnId, StagedColumnPrompt[]>> = {};
+    const stagedSummaries: string[] = [];
+
+    for (const role of promptGenerationResult.targetRoles) {
+      const columnId = selectedFlow.role_bindings?.[role]?.column_id;
+      const rolePrompt = promptGenerationResult.promptByRole[role];
+      if (!columnId || !rolePrompt) continue;
+
+      stagedByColumn[columnId] = [
+        ...(stagedByColumn[columnId] ?? []),
+        { role, stepId: promptGenerationResult.stepId, prompt: rolePrompt },
+      ];
+      stagedSummaries.push(`Staged to ${columnId}; Role: ${role}; Step: ${promptGenerationResult.stepId}`);
+    }
+
+    const roleColumnIds = Object.keys(stagedByColumn);
 
     setPrompt(promptText);
     if (roleColumnIds.length) {
       setSendToAll(false);
       setSendTargets(Object.fromEntries(columns.map((column) => [column.id, roleColumnIds.includes(column.id)])));
+      setStagedPromptsByColumn((current) => ({ ...current, ...stagedByColumn }));
+      setRuntimeActionLogs((current) =>
+        stagedSummaries.reduce(
+          (logs, summary) =>
+            addActionLog(
+              logs,
+              "Prompt Staged to Role Column",
+              flowRuntimeState.state,
+              flowRuntimeState.routeContext,
+              flowRuntimeState.state,
+              flowRuntimeState.routeContext,
+              promptGenerationResult.stepId,
+              summary
+            ),
+          current
+        )
+      );
     }
     setCopyStatus(roleColumnIds.length ? `Staged for ${roleColumnIds.join(", ")}` : "Staged prompt; external handoff/manual target");
     window.setTimeout(() => setCopyStatus(""), 1800);
@@ -2305,6 +2342,9 @@ export default function Home() {
         for (const column of normalized) next[column.id] = prev[column.id] ?? [];
         return next;
       });
+      setStagedPromptsByColumn((prev) =>
+        Object.fromEntries(normalized.map((column) => [column.id, prev[column.id] ?? []]))
+      );
       setSendTargets(Object.fromEntries(normalized.map((column) => [column.id, true])));
     } catch {
       // ignore
@@ -2350,6 +2390,7 @@ export default function Home() {
     const nextColumns = [...columns, newColumn];
     saveColumns(nextColumns);
     setColumnHistories((prev) => ({ ...prev, [id]: [] }));
+    setStagedPromptsByColumn((prev) => ({ ...prev, [id]: [] }));
     setSendTargets((prev) => ({ ...prev, [id]: true }));
     setPage(Math.floor((nextColumns.length - 1) / columnsPerPage));
   }
@@ -2361,6 +2402,12 @@ export default function Home() {
     saveColumns(nextColumns);
 
     setColumnHistories((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+
+    setStagedPromptsByColumn((prev) => {
       const next = { ...prev };
       delete next[id];
       return next;
@@ -2614,6 +2661,11 @@ export default function Home() {
     setPrompt("");
     setAttachments([]);
     setSelectedReferences([]);
+    setStagedPromptsByColumn((prev) => {
+      const next = { ...prev };
+      for (const key of activeKeys) next[key] = [];
+      return next;
+    });
     setReferenceMode(false);
     setLoading(true);
     setGlobalError("");
@@ -2691,6 +2743,7 @@ export default function Home() {
 
     saveColumns(defaultColumns);
     setColumnHistories(createEmptyHistories(defaultColumns));
+    setStagedPromptsByColumn({});
     setSendTargets(Object.fromEntries(defaultColumns.map((column) => [column.id, true])));
     setSelectedReferences([]);
     setPage(0);
@@ -2701,6 +2754,7 @@ export default function Home() {
   function clearColumnHistory(id: ColumnId) {
     if (loading) return;
     setColumnHistories((prev) => ({ ...prev, [id]: [] }));
+    setStagedPromptsByColumn((prev) => ({ ...prev, [id]: [] }));
   }
 
   function updateSystemPrompt(id: ColumnId, value: string) {
@@ -3922,6 +3976,7 @@ export default function Home() {
           {visibleColumns.map((column) => {
             const turns = columnHistories[column.id] ?? [];
             const modelOptions = modelCatalog[column.provider] ?? [];
+            const stagedPrompts = stagedPromptsByColumn[column.id] ?? [];
 
             return (
               <article className="column" key={column.id}>
@@ -3966,6 +4021,29 @@ export default function Home() {
                       <button className="miniButton" onClick={() => clearSystemPrompt(column.id)} disabled={loading || !column.systemPrompt}>指示クリア</button>
                       <button className="miniButton danger" onClick={() => clearColumnHistory(column.id)} disabled={loading || !turns.length}>この履歴クリア</button>
                     </div>
+                  </div>
+                )}
+
+                {stagedPrompts.length > 0 && (
+                  <div className="stagedPromptBox">
+                    <div className="stagedPromptHeader">
+                      <strong>Staged Prompt</strong>
+                      <button
+                        className="copyButton"
+                        type="button"
+                        onClick={() => setStagedPromptsByColumn((prev) => ({ ...prev, [column.id]: [] }))}
+                      >
+                        Clear
+                      </button>
+                    </div>
+                    {stagedPrompts.map((item) => (
+                      <div className="stagedPromptItem" key={`${item.stepId}-${item.role}`}>
+                        <div className="stagedPromptMeta">
+                          Role: {item.role} / Step: {item.stepId}
+                        </div>
+                        <div className="promptMini">{item.prompt}</div>
+                      </div>
+                    ))}
                   </div>
                 )}
 

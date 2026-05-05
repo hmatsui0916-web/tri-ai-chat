@@ -461,6 +461,37 @@ textarea {
   font-size: 13px;
 }
 
+.stagedPromptBox {
+  display: grid;
+  gap: 8px;
+  padding: 9px;
+  border-bottom: 1px solid #e5e7eb;
+  background: #f8fafc;
+}
+
+.stagedPromptHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #111827;
+  font-size: 13px;
+}
+
+.stagedPromptItem {
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.stagedPromptMeta {
+  padding: 7px 9px 0;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 
 .modelSettings {
   display: grid;
