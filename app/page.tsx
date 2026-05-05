@@ -504,6 +504,7 @@ function isExternalHandoffStep(step: ResolvedFlowStepV14): boolean {
 function isReviewerDecisionStep(step: ResolvedFlowStepV14 | null | undefined): boolean {
   return (
     !!step &&
+    !step.template_unresolved &&
     (step.decision_key === "review_decision" ||
       step.template_ref === "reviewer_decision_step" ||
       step.id === "main-04")
@@ -1163,6 +1164,7 @@ export default function Home() {
   const [clearedExternalHandoffStepIds, setClearedExternalHandoffStepIds] = useState<string[]>([]);
   const [clearedManualExecutionStepIds, setClearedManualExecutionStepIds] = useState<string[]>([]);
   const [completedParallelStepIds, setCompletedParallelStepIds] = useState<string[]>([]);
+  const [loggedTemplateUnresolvedStepIds, setLoggedTemplateUnresolvedStepIds] = useState<string[]>([]);
   const [selectedDecision, setSelectedDecision] = useState<"pass" | "conditional" | "reject" | null>(null);
   const [verifiedConditionInputs, setVerifiedConditionInputs] = useState<VerifiedConditionInputs>({
     debuggerPass: false,
@@ -1266,6 +1268,7 @@ export default function Home() {
 
   const flowRuntimeNextSteps = useMemo(() => {
     if (!isFlowV14(selectedFlow)) return [] as ResolvedFlowStepV14[];
+    if (currentStep?.template_unresolved) return [] as ResolvedFlowStepV14[];
     return getNextStepsAfterCurrentStep(selectedFlow, currentStep, completedStepIds);
   }, [selectedFlow, currentStep, completedStepIds]);
 
@@ -1295,7 +1298,7 @@ export default function Home() {
   const isParallelReadyToAdvance = parallelRuntimeState ? isParallelComplete(parallelRuntimeState) : false;
 
   useEffect(() => {
-    const templateUnresolved = flowRuntimeNextSteps.some((step) => step.template_unresolved === true);
+    const templateUnresolved = currentStep?.template_unresolved === true || flowRuntimeNextSteps.some((step) => step.template_unresolved === true);
     const currentStepIsReviewerDecision = isReviewerDecisionStep(currentStep);
     const decisionWaiting = !!currentStep && currentStepIsReviewerDecision && !completedStepIds.includes(currentStep.id);
     const humanGateWaiting = !!currentStep?.human_gate && !currentStepIsReviewerDecision && !clearedHumanGateStepIds.includes(currentStep.id);
@@ -1344,6 +1347,24 @@ export default function Home() {
     feedbackLoopCounts,
     selectedFlow,
   ]);
+
+  useEffect(() => {
+    if (!currentStep?.template_unresolved || loggedTemplateUnresolvedStepIds.includes(currentStep.id)) return;
+
+    const note = currentStep.template_ref ? `unresolved template_ref: ${currentStep.template_ref}` : "unresolved template_ref";
+    const newLogs = addActionLog(
+      runtimeActionLogs,
+      `Template Unresolved: ${currentStep.id}`,
+      flowRuntimeState.state,
+      flowRuntimeState.routeContext,
+      flowRuntimeState.state,
+      flowRuntimeState.routeContext,
+      currentStep.id,
+      note
+    );
+    setRuntimeActionLogs(newLogs);
+    setLoggedTemplateUnresolvedStepIds((current) => [...current, currentStep.id]);
+  }, [currentStep, loggedTemplateUnresolvedStepIds, runtimeActionLogs, flowRuntimeState]);
 
   const applyResolvedStep = (
     step: ResolvedFlowStepV14,
@@ -1583,6 +1604,7 @@ export default function Home() {
 
   const isCurrentStepCompleteDisabled = useMemo(() => {
     if (!currentStep || !isFlowV14(selectedFlow)) return true;
+    if (currentStep.template_unresolved) return true;
     if (completedStepIds.includes(currentStep.id)) return true;
     if (isReviewerDecisionStep(currentStep)) return true;
     if (currentStep.human_gate && !clearedHumanGateStepIds.includes(currentStep.id)) return true;
@@ -1647,6 +1669,7 @@ export default function Home() {
     setClearedExternalHandoffStepIds([]);
     setClearedManualExecutionStepIds([]);
     setCompletedParallelStepIds([]);
+    setLoggedTemplateUnresolvedStepIds([]);
     setCurrentStepId(null);
   }, [selectedFlowId]);
 
@@ -2741,7 +2764,9 @@ export default function Home() {
                             {step.type || "(no type)"} / state_to: {step.state_to || "(none)"} / route_context: {step.route_context || "(none)"}
                           </div>
                           <div style={{ marginTop: "8px", display: "flex", gap: "8px", flexWrap: "wrap" }}>
-                            {isReviewerDecisionStep(step) ? (
+                            {step.template_unresolved ? (
+                              <div style={{ color: "#b33" }}>Template unresolved. Execution is blocked.</div>
+                            ) : isReviewerDecisionStep(step) ? (
                               <div style={{ color: "#555" }}>Use Decision Control for this step.</div>
                             ) : (
                               <button type="button" onClick={() => applyResolvedStep(step)} disabled={step.id === currentStep?.id && isCurrentStepCompleteDisabled}>
@@ -2845,6 +2870,7 @@ export default function Home() {
                         setClearedExternalHandoffStepIds([]);
                         setClearedManualExecutionStepIds([]);
                         setCompletedParallelStepIds([]);
+                        setLoggedTemplateUnresolvedStepIds([]);
                         setFeedbackLoopCounts(createEmptyFeedbackLoopCounts());
                         setParallelRuntimeState(null);
                         setRuntimeActionLogs(newLogs);
@@ -2855,7 +2881,7 @@ export default function Home() {
                     >
                       ↻ Runtime Reset
                     </button>
-                    {currentStep && !isReviewerDecisionStep(currentStep) && !isParallelStep(currentStep) && currentStep.type !== "join" && (
+                    {currentStep && !currentStep.template_unresolved && !isReviewerDecisionStep(currentStep) && !isParallelStep(currentStep) && currentStep.type !== "join" && (
                       <button
                         onClick={() => {
                           applyResolvedStep(currentStep);
