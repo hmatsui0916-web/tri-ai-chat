@@ -1348,11 +1348,11 @@ function buildPromptVariables(
   const allowed = new Set<RuntimeInputKey>(template.variables);
   const required = getRequiredInputsForStep(role, step);
   const variables: PromptRuntimeInputs = {};
+  const candidateKeys = Array.from(new Set<RuntimeInputKey>([...template.variables, ...required]));
 
-  for (const key of [...template.variables, ...required]) {
-    if (!allowed.has(key) && !required.includes(key)) continue;
+  for (const key of candidateKeys) {
     const value = inputs[key];
-    if (typeof value === "string" && value.trim()) {
+    if ((allowed.has(key) || required.includes(key)) && typeof value === "string" && value.trim()) {
       variables[key] = value;
     }
   }
@@ -1826,7 +1826,55 @@ export default function Home() {
     }
 
     if (isReviewerDecisionStep(step)) {
-      setCopyStatus(`Decision is still waiting for ${step.id}`);
+      if (!selectedDecision) {
+        setCopyStatus(`Decision is still waiting for ${step.id}`);
+        window.setTimeout(() => setCopyStatus(""), 1800);
+        return;
+      }
+
+      if (!isFlowV14(selectedFlow)) return;
+
+      const result = applyDecisionStep(step, selectedFlow, selectedDecision);
+      const nextState = result.state_to || flowRuntimeState.state;
+      const routeSteps = getResolvedStepsForRoute(selectedFlow, flowRuntimeState.routeContext);
+      const previousStep = findPreviousRouteStep(selectedFlow, step);
+      const rollbackCompletedStepIds = previousStep
+        ? completedStepIds.filter((stepId) => {
+            const index = routeSteps.findIndex((routeStep) => routeStep.id === stepId);
+            const previousIndex = routeSteps.findIndex((routeStep) => routeStep.id === previousStep.id);
+            return index >= 0 && index < previousIndex;
+          })
+        : [];
+      const nextCompletedStepIds = selectedDecision === "reject"
+        ? rollbackCompletedStepIds
+        : [...completedStepIds, step.id];
+      const nextRuntimeState = {
+        state: nextState,
+        routeContext: flowRuntimeState.routeContext,
+      };
+      const nextStep = findRuntimeCurrentStep(selectedFlow, nextRuntimeState, nextCompletedStepIds);
+      const newLogs = addActionLog(
+        runtimeActionLogs,
+        `Reviewer Decision Completed: ${selectedDecision}`,
+        flowRuntimeState.state,
+        flowRuntimeState.routeContext,
+        nextState,
+        flowRuntimeState.routeContext,
+        step.id,
+        [
+          "decision_key: review_decision",
+          result.to ? `to: ${result.to}` : undefined,
+          result.state_to ? `state_to: ${result.state_to}` : undefined,
+          nextStep?.id ? `next: ${nextStep.id}` : undefined,
+        ].filter(Boolean).join("; ")
+      );
+
+      setFlowRuntimeState(nextRuntimeState);
+      setCompletedStepIds(nextCompletedStepIds);
+      setCurrentStepId(nextStep?.id ?? null);
+      setLastTransitionTo(result.to || null);
+      setRuntimeActionLogs(newLogs);
+      setCopyStatus(`Decision: ${selectedDecision} completed`);
       window.setTimeout(() => setCopyStatus(""), 1800);
       return;
     }
@@ -1896,14 +1944,6 @@ export default function Home() {
     setCompletedStepIds(nextCompletedStepIds);
     setCurrentStepId(nextStep?.id ?? null);
     setRuntimeActionLogs(newLogs);
-
-    // Handle loop increment on cause transition
-    if (step.type === "cause_classification_resolver") {
-      setFeedbackLoopCounts((current) => ({
-        ...current,
-        [controlCause]: (current[controlCause] ?? 0) + 1,
-      }));
-    }
   };
 
   const applyParallelStep = () => {
