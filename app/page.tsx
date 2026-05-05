@@ -1154,6 +1154,18 @@ export default function Home() {
     return runtimeRouting?.steps ?? [];
   }, [selectedFlow, flowRuntimeState]);
 
+  useEffect(() => {
+    // Initialize currentStepId when flow changes or runtime state changes
+    if (isFlowV14(selectedFlow) && flowRuntimeNextSteps.length > 0) {
+      const firstStep = flowRuntimeNextSteps[0];
+      if (firstStep && firstStep.id) {
+        setCurrentStepId(firstStep.id);
+      }
+    } else {
+      setCurrentStepId(null);
+    }
+  }, [selectedFlow, flowRuntimeNextSteps]);
+
   const activeParallelStep = useMemo(() => {
     return flowRuntimeNextSteps.find(isParallelStep);
   }, [flowRuntimeNextSteps]);
