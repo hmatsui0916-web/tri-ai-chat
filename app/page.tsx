@@ -1351,16 +1351,48 @@ function getRequiredInputsForStep(role: RoleName, step: ResolvedFlowStepV14): Ru
   return ROLE_REQUIRED_INPUTS[role];
 }
 
+function getAllowedInputsForStep(role: RoleName, step: ResolvedFlowStepV14): RuntimeInputKey[] {
+  if (role === "PM") {
+    if (step.id === "main-01") return ["unit_id", "human_goal"];
+    if (step.id === "main-09") return ["unit_id", "control_decision"];
+    return ["unit_id", "review_report"];
+  }
+
+  if (role === "Designer") {
+    if (step.id === "main-02") return ["unit_id", "pm_decision"];
+    if (step.id === "fb-spec-01") return ["unit_id", "rework_instruction"];
+    return ["unit_id", "review_report"];
+  }
+
+  if (role === "Worker") {
+    if (step.id === "fb-impl-01") return ["unit_id", "rework_instruction", "function_name"];
+    return ["unit_id", "packet_content", "function_name"];
+  }
+
+  if (role === "Infra") {
+    if (step.id === "fb-env-01") return ["unit_id", "rework_instruction", "target"];
+    if (step.id === "fb-env-03") return ["unit_id", "human_execution_result", "target"];
+    return ["unit_id", "worker_code", "packet_content", "target"];
+  }
+
+  if (role === "Human") {
+    if (step.id === "fb-env-02") return ["unit_id", "infra_test_plan"];
+    if (step.id === "main-10") return ["unit_id", "pm_approval_request"];
+    return ["unit_id"];
+  }
+
+  return ROLE_TEMPLATE_DEFINITIONS[role].variables;
+}
+
 function buildPromptVariables(
   role: RoleName,
   step: ResolvedFlowStepV14,
   inputs: PromptRuntimeInputs
 ): PromptRuntimeInputs {
-  const template = ROLE_TEMPLATE_DEFINITIONS[role];
-  const allowed = new Set<RuntimeInputKey>(template.variables);
+  const allowed = new Set<RuntimeInputKey>(getAllowedInputsForStep(role, step));
   const required = getRequiredInputsForStep(role, step);
   const variables: PromptRuntimeInputs = {};
-  const candidateKeys = Array.from(new Set<RuntimeInputKey>([...template.variables, ...required]));
+  const candidateKeys = Array.from(new Set<RuntimeInputKey>([...allowed, ...required]));
 
   for (const key of candidateKeys) {
     const value = inputs[key];
