@@ -501,6 +501,15 @@ function isExternalHandoffStep(step: ResolvedFlowStepV14): boolean {
   return step.type === "external_handoff";
 }
 
+function isReviewerDecisionStep(step: ResolvedFlowStepV14 | null | undefined): boolean {
+  return (
+    !!step &&
+    (step.decision_key === "review_decision" ||
+      step.template_ref === "reviewer_decision_step" ||
+      step.id === "main-04")
+  );
+}
+
 function createEmptyFeedbackLoopCounts(): FeedbackLoopCounts {
   return {
     implementation: 0,
@@ -1287,8 +1296,9 @@ export default function Home() {
 
   useEffect(() => {
     const templateUnresolved = flowRuntimeNextSteps.some((step) => step.template_unresolved === true);
-    const decisionWaiting = !!currentStep?.decision_key && !completedStepIds.includes(currentStep.id);
-    const humanGateWaiting = !!currentStep?.human_gate && !currentStep?.decision_key && !clearedHumanGateStepIds.includes(currentStep.id);
+    const currentStepIsReviewerDecision = isReviewerDecisionStep(currentStep);
+    const decisionWaiting = !!currentStep && currentStepIsReviewerDecision && !completedStepIds.includes(currentStep.id);
+    const humanGateWaiting = !!currentStep?.human_gate && !currentStepIsReviewerDecision && !clearedHumanGateStepIds.includes(currentStep.id);
     const externalHandoffWaiting = currentStep ? isExternalHandoffStep(currentStep) && !clearedExternalHandoffStepIds.includes(currentStep.id) : false;
     const manualExecutionWaiting = currentStep?.type === "manual_execution" && !clearedManualExecutionStepIds.includes(currentStep.id);
     const previousStep = isFlowV14(selectedFlow) && currentStep ? findPreviousRouteStep(selectedFlow, currentStep) : null;
@@ -1345,7 +1355,7 @@ export default function Home() {
       return;
     }
 
-    if (step.decision_key) {
+    if (isReviewerDecisionStep(step)) {
       setCopyStatus(`Decision is still waiting for ${step.id}`);
       window.setTimeout(() => setCopyStatus(""), 1800);
       return;
@@ -1547,7 +1557,7 @@ export default function Home() {
   const isCurrentStepCompleteDisabled = useMemo(() => {
     if (!currentStep || !isFlowV14(selectedFlow)) return true;
     if (completedStepIds.includes(currentStep.id)) return true;
-    if (currentStep.decision_key) return true;
+    if (isReviewerDecisionStep(currentStep)) return true;
     if (currentStep.human_gate && !clearedHumanGateStepIds.includes(currentStep.id)) return true;
     if (isExternalHandoffStep(currentStep) && !clearedExternalHandoffStepIds.includes(currentStep.id)) return true;
     if (currentStep.type === "manual_execution" && !clearedManualExecutionStepIds.includes(currentStep.id)) return true;
@@ -2704,7 +2714,7 @@ export default function Home() {
                             {step.type || "(no type)"} / state_to: {step.state_to || "(none)"} / route_context: {step.route_context || "(none)"}
                           </div>
                           <div style={{ marginTop: "8px", display: "flex", gap: "8px", flexWrap: "wrap" }}>
-                            {step.decision_key ? (
+                            {isReviewerDecisionStep(step) ? (
                               <div style={{ color: "#555" }}>Use Decision Control for this step.</div>
                             ) : (
                               <button type="button" onClick={() => applyResolvedStep(step)} disabled={step.id === currentStep?.id && isCurrentStepCompleteDisabled}>
@@ -2818,7 +2828,7 @@ export default function Home() {
                     >
                       ↻ Runtime Reset
                     </button>
-                    {currentStep && !currentStep.decision_key && !isParallelStep(currentStep) && currentStep.type !== "join" && (
+                    {currentStep && !isReviewerDecisionStep(currentStep) && !isParallelStep(currentStep) && currentStep.type !== "join" && (
                       <button
                         onClick={() => {
                           applyResolvedStep(currentStep);
@@ -2895,11 +2905,11 @@ export default function Home() {
               </div>
 
               {/* 4. Decision & Cause Controls */}
-              {currentStep?.decision_key === "review_decision" && (
+              {isReviewerDecisionStep(currentStep) && (
                 <div style={{ marginBottom: "16px", padding: "12px", backgroundColor: "#fff", borderRadius: "4px", border: "1px solid #cce5ff" }}>
                   <div style={{ fontSize: "0.95em", fontWeight: "bold", marginBottom: "8px" }}>🎯 Decision Control</div>
                   <div style={{ marginBottom: "8px", fontSize: "0.85em", color: "#555" }}>
-                    decision_key: {currentStep.decision_key} / Complete is blocked until a decision is selected.
+                    decision_key: review_decision / Complete is blocked until a decision is selected.
                   </div>
                   <div style={{ display: "grid", gap: "10px" }}>
                     <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
@@ -2907,7 +2917,7 @@ export default function Home() {
                         <button
                           key={decision}
                           onClick={() => {
-                            const step = currentStep?.decision_key === "review_decision" ? currentStep : undefined;
+                            const step = isReviewerDecisionStep(currentStep) ? currentStep : undefined;
                             if (step) {
                               const result = applyDecisionStep(step, selectedFlow, decision as "pass" | "conditional" | "reject");
                               const nextState = result.state_to || flowRuntimeState.state;
@@ -2938,7 +2948,12 @@ export default function Home() {
                                 nextState,
                                 flowRuntimeState.routeContext,
                                 step.id,
-                                result.to ? `decision_key: ${step.decision_key}; decision to: ${result.to}` : `decision_key: ${step.decision_key}`
+                                [
+                                  "decision_key: review_decision",
+                                  result.to ? `to: ${result.to}` : undefined,
+                                  result.state_to ? `state_to: ${result.state_to}` : undefined,
+                                  nextStep?.id ? `next: ${nextStep.id}` : undefined,
+                                ].filter(Boolean).join("; ")
                               );
                               setFlowRuntimeState({
                                 state: nextState,
