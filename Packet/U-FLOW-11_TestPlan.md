@@ -170,31 +170,31 @@ U-FLOW-11の実装では、必須Input不足時にPrompt生成を停止するこ
 判定：PASS / FAIL
 
 ---
-
-## TC-04 未定義Input混入防止
+TC-04 未定義Input混入防止
 
 目的：Roleごとに許可されたInputだけがPrompt Variablesへ入ることを確認する。
 
 手順：
 
-1. 複数Input欄に値を入れる
-2. Reviewer stepでPrompt生成
-3. Designer / Worker / Infra stepでも同様に確認
-4. Prompt内のProvided Variablesを確認
+複数Input欄に値を入れる
+Reviewer stepでPrompt生成
+Worker stepでPrompt生成
+Infra main-07 stepでPrompt生成
+Infra fb-env-01 / fb-env-03 stepでもPrompt生成
+生成Prompt内のProvided Variables / Input欄を確認する
 
 期待結果：
 
-* Reviewerには `spec_content` のみ
-* Worker main-06 / fb-spec-05には `packet_content`
-* Worker fb-impl-01には `rework_instruction`
-* Infra fb-env-01には `rework_instruction`
-* Infra fb-env-03には `human_execution_result`
-* 許可外InputがPromptに混入しない
-
-Role別Input Schemaでは、各Roleが処理開始に使えるInputが限定されています。
+Reviewerには spec_content のみが入る
+Worker main-06 / fb-spec-05には packet_content が入る
+Worker fb-impl-01には rework_instruction が入る
+Infra main-07には worker_code, packet_content のみが入る
+Infra main-07には human_execution_result / rework_instruction が混入しない
+Infra fb-env-01には rework_instruction が入る
+Infra fb-env-03には human_execution_result が入る
+許可外InputがPromptに混入しない
 
 判定：PASS / FAIL
-
 ---
 
 ## TC-05 main-05 Integrator-S PM承認済みSpec Guard
@@ -362,54 +362,83 @@ Debugger最終確認では、Decision Controlの二重実装解消とselectedDec
 判定：PASS / FAIL
 
 ---
+TC-11 Manual Execution Prompt / Guide確認
 
-## TC-11 Manual Execution Prompt / Guide確認
-
-目的：fb-env-02でHuman向けManual Execution Guideが表示されることを確認する。
+目的：fb-env-02でHuman向けManual Execution Guideが表示され、fb-env-03でHuman実行結果をInfra Promptへ渡せることを確認する。
 
 手順：
 
-1. environment feedback loopへ入る
-2. fb-env-01を完了
-3. fb-env-02に到達
-4. Manual Execution Guideを確認
-5. Human実行結果を入力
-6. fb-env-03へ進む
+environment feedback loopへ入る
+fb-env-01を完了
+fb-env-02に到達
+Manual Execution Guideを確認
+Human実行結果を入力
+fb-env-02を完了
+fb-env-03へ進む
+fb-env-03でInfra Promptを生成する
 
 期待結果：
 
-* Role: Human または Human Guide
-* `infra_test_plan` が提示される
-* Human実行手順が表示される
-* Human実行結果を入力できる
-* 入力後、fb-env-03 Infraへ渡せる
+fb-env-02では Role: Human または Human Guide として表示される
+infra_test_plan が提示される
+Human実行手順が表示される
+Human実行結果を入力できる
+入力後、fb-env-03 Infraへ渡せる
+fb-env-03では Role: Infra としてPrompt生成される
+fb-env-03では human_execution_result がInputとして提供される
+fb-env-03のPromptに TestResult 出力指示が含まれる
 
 判定：PASS / FAIL
 
 ---
-
-## TC-12 max_iterations超過時のPrompt生成停止
+TC-12 max_iterations超過時のPrompt生成停止
 
 目的：loop count上限到達時にPrompt生成が停止し、PM警告が表示されることを確認する。
 
-手順：
+前提：
 
-1. implementation branchを3回実行
-2. implementation countを3/3にする
-3. 4回目のimplementation branchへ入ろうとする
-4. Prompt生成を試す
+Runtime UIに feedbackLoopCounts を直接編集できる機能がある場合は、その機能を使用する
+直接編集機能がない場合は、ControlReviewからimplementation branchを繰り返し適用してcounterを進める
+各回のloop完走には、fb-impl-01 → fb-impl-02 → fb-impl-03 → ControlReview復帰までを含める
+
+手順A：counter直接設定UIがある場合
+
+Runtime Reset
+ControlReviewまで進める
+implementation loop countを 3 / 3 に設定する
+Verified条件はOFFのままにする
+Cause Classificationで implementation を選択
+Apply Feedback Branchを押す
+Prompt生成またはbranch遷移が停止されることを確認する
+
+手順B：counter直接設定UIがない場合
+
+Runtime Reset
+ControlReviewまで進める
+Verified条件はOFFのままにする
+Cause Classificationで implementation を選択
+Apply Feedback Branchを押す
+fb-impl-01 → fb-impl-02 → fb-impl-03 を完走し、ControlReviewへ戻る
+上記4〜6を繰り返し、implementation: 3 / 3 にする
+4回目として再度 Cause Classificationで implementation を選択
+Apply Feedback Branchを押す
 
 期待結果：
 
-* Prompt生成されない
-* max_iterations超過エラーが表示される
-* PM警告または手動介入待ち表示
-* loop countが4/3にならない
+1〜3回目は許容される
+implementation: 3 / 3 到達時に警告が表示される
+4回目はfeedback_implementationへ進まない
+Prompt生成されない
+max_iterations超過エラーが表示される
+PM警告または手動介入待ち表示が出る
+loop countが 4 / 3 にならない
+他branchのcounterには影響しない
 
-U-FLOW-11仕様では、Feedback系stepのPrompt生成前にloop_counterを参照し、上限超過時はPrompt生成停止とPMエスカレーションを行う仕様です。
+期待エラー例：
+
+Loop limit exceeded: Maximum iterations (3) exceeded for branch implementation.
 
 判定：PASS / FAIL
-
 ---
 
 ## TC-13 Verified Transition後のmain-09 PM Prompt生成
