@@ -760,7 +760,7 @@ function getAllResolvedFlowSteps(flow: FlowDefinitionV14): ResolvedFlowStepV14[]
     getResolvedFeedbackBranchFlow(flow, branchKey)
   );
 
-  return [...main, ...branchSteps].filter((step) => !step.template_unresolved);
+  return [...main, ...branchSteps];
 }
 
 function getResolvedStepsForRoute(
@@ -768,7 +768,7 @@ function getResolvedStepsForRoute(
   routeContext: string
 ): ResolvedFlowStepV14[] {
   if (routeContext === "main") {
-    return getResolvedMainFlow(flow).filter((step) => !step.template_unresolved);
+    return getResolvedMainFlow(flow);
   }
 
   const branchKey = Object.keys(flow.feedback_flow?.branches ?? {}).find((key) => {
@@ -778,7 +778,7 @@ function getResolvedStepsForRoute(
 
   if (!branchKey) return [];
 
-  return getResolvedFeedbackBranchFlow(flow, branchKey).filter((step) => !step.template_unresolved);
+  return getResolvedFeedbackBranchFlow(flow, branchKey);
 }
 
 function findStepById(
@@ -1349,6 +1349,24 @@ export default function Home() {
     step: ResolvedFlowStepV14,
     options?: { stateOverride?: string; routeContextOverride?: string }
   ) => {
+    if (step.template_unresolved) {
+      const note = step.template_ref ? `unresolved template_ref: ${step.template_ref}` : "unresolved template_ref";
+      const newLogs = addActionLog(
+        runtimeActionLogs,
+        `Template Unresolved: ${step.id}`,
+        flowRuntimeState.state,
+        flowRuntimeState.routeContext,
+        flowRuntimeState.state,
+        flowRuntimeState.routeContext,
+        step.id,
+        note
+      );
+      setRuntimeActionLogs(newLogs);
+      setCopyStatus(note);
+      window.setTimeout(() => setCopyStatus(""), 1800);
+      return;
+    }
+
     if (completedStepIds.includes(step.id)) {
       setCopyStatus(`Step ${step.id} is already completed`);
       window.setTimeout(() => setCopyStatus(""), 1800);
@@ -3185,6 +3203,11 @@ export default function Home() {
                   <div style={{ display: "grid", gap: "6px", fontSize: "0.85em" }}>
                     {guardStatus.templateUnresolved && <div style={{ color: "#d32f2f" }}>⚠ Template Unresolved</div>}
                     {guardStatus.humanGateWaiting && <div style={{ color: "#f57c00" }}>⏸ Human Gate 待ち</div>}
+                    {currentStep?.template_unresolved && (
+                      <div style={{ color: "#d32f2f" }}>
+                        unresolved template_ref: {currentStep.template_ref || "(missing)"}
+                      </div>
+                    )}
                     {guardStatus.decisionWaiting && <div style={{ color: "#f57c00" }}>Reviewer Decision waiting</div>}
                     {guardStatus.externalHandoffWaiting && (
                       <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
