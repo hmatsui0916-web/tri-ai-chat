@@ -1389,6 +1389,30 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    async function loadFullFlow() {
+      try {
+        const res = await fetch("/ai-business-os-flow-v1.4.json", { cache: "no-store" });
+        if (!res.ok) throw new Error("ai-business-os-flow-v1.4.json not found");
+        const parsed = normalizeFlows([await res.json()]);
+        if (parsed.length > 0) {
+          setFlows(prev => {
+            const newFlows = [...prev, ...parsed];
+            // Prefer v1.4 flow if available
+            const v14Flow = newFlows.find(f => isFlowV14(f));
+            if (v14Flow) {
+              setSelectedFlowId(v14Flow.id);
+            }
+            return newFlows;
+          });
+        }
+      } catch {
+        // ignore if file not found
+      }
+    }
+    loadFullFlow();
+  }, []);
+
+  useEffect(() => {
     const stored = localStorage.getItem("tri-ai-variable-columns-configs");
     if (!stored) return;
 
