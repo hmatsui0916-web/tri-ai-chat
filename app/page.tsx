@@ -785,7 +785,12 @@ function findRuntimeCurrentStep(
   completedStepIds: string[]
 ): ResolvedFlowStepV14 | null {
   const completed = new Set(completedStepIds);
-  const routed = resolveRouting(flow, runtimeState.state, runtimeState.routeContext).steps;
+  const runtimeRouting = resolveRouting(flow, runtimeState.state, runtimeState.routeContext);
+  if (hasControlReviewSpecialRefs(runtimeRouting)) {
+    return null;
+  }
+
+  const routed = runtimeRouting.steps;
   const routedCandidate = routed.find((step) => !completed.has(step.id));
   if (routedCandidate) return routedCandidate;
 
@@ -795,6 +800,16 @@ function findRuntimeCurrentStep(
   }, -1);
 
   return routeSteps.slice(lastCompletedIndex + 1).find((step) => !completed.has(step.id)) ?? null;
+}
+
+function findPreviousRouteStep(
+  flow: FlowDefinitionV14,
+  step: ResolvedFlowStepV14
+): ResolvedFlowStepV14 | null {
+  const routeSteps = getResolvedStepsForRoute(flow, step.route_context || "main");
+  const index = routeSteps.findIndex((candidate) => candidate.id === step.id);
+  if (index <= 0) return null;
+  return routeSteps[index - 1];
 }
 
 function getNextStepsAfterCurrentStep(
@@ -1135,6 +1150,9 @@ export default function Home() {
   const [currentStepId, setCurrentStepId] = useState<string | null>(null);
   const [completedStepIds, setCompletedStepIds] = useState<string[]>([]);
   const [clearedHumanGateStepIds, setClearedHumanGateStepIds] = useState<string[]>([]);
+  const [clearedExternalHandoffStepIds, setClearedExternalHandoffStepIds] = useState<string[]>([]);
+  const [clearedManualExecutionStepIds, setClearedManualExecutionStepIds] = useState<string[]>([]);
+  const [completedParallelStepIds, setCompletedParallelStepIds] = useState<string[]>([]);
   const [selectedDecision, setSelectedDecision] = useState<"pass" | "conditional" | "reject" | null>(null);
   const [verifiedConditionInputs, setVerifiedConditionInputs] = useState<VerifiedConditionInputs>({
     debuggerPass: false,
@@ -1211,6 +1229,21 @@ export default function Home() {
     });
   }, [selectedFlow, routingResolution, controlVerified, controlCause, codeChangeRequired, reclassifyCause, verifiedConditionInputs]);
 
+  const runtimeRoutingResolution = useMemo(() => {
+    if (!isFlowV14(selectedFlow)) return null;
+    return resolveRouting(selectedFlow, flowRuntimeState.state, flowRuntimeState.routeContext);
+  }, [selectedFlow, flowRuntimeState]);
+
+  const runtimeControlReviewResolution = useMemo(() => {
+    if (!isFlowV14(selectedFlow) || !runtimeRoutingResolution) return null;
+    return resolveControlReviewRuntime(selectedFlow, runtimeRoutingResolution, {
+      verified: controlVerified || isVerifiedConditionMet(verifiedConditionInputs),
+      cause: controlVerified ? undefined : controlCause,
+      codeChangeRequired,
+      reclassifyCause: controlCause === "environment" ? reclassifyCause ?? undefined : undefined,
+    });
+  }, [selectedFlow, runtimeRoutingResolution, controlVerified, controlCause, codeChangeRequired, reclassifyCause, verifiedConditionInputs]);
+
   const currentStep = useMemo(() => {
     if (!isFlowV14(selectedFlow)) return null;
     const selectedStep = findStepById(selectedFlow, currentStepId);
@@ -1253,9 +1286,12 @@ export default function Home() {
   useEffect(() => {
     const templateUnresolved = flowRuntimeNextSteps.some((step) => step.template_unresolved === true);
     const humanGateWaiting = !!currentStep?.human_gate && !clearedHumanGateStepIds.includes(currentStep.id);
-    const externalHandoffWaiting = currentStep ? isExternalHandoffStep(currentStep) : false;
-    const manualExecutionWaiting = currentStep?.type === "manual_execution";
-    const joinIncomplete = !!activeParallelStep && !isParallelReadyToAdvance;
+    const externalHandoffWaiting = currentStep ? isExternalHandoffStep(currentStep) && !clearedExternalHandoffStepIds.includes(currentStep.id) : false;
+    const manualExecutionWaiting = currentStep?.type === "manual_execution" && !clearedManualExecutionStepIds.includes(currentStep.id);
+    const previousStep = isFlowV14(selectedFlow) && currentStep ? findPreviousRouteStep(selectedFlow, currentStep) : null;
+    const joinIncomplete =
+      (!!activeParallelStep && !isParallelReadyToAdvance) ||
+      (currentStep?.type === "join" && !!previousStep && isParallelStep(previousStep) && !completedParallelStepIds.includes(previousStep.id));
 
     let maxIterationsReached = false;
     let maxIterationsDetails: Record<string, string> = {};
@@ -1278,7 +1314,18 @@ export default function Home() {
       maxIterationsReached,
       details: maxIterationsReached ? maxIterationsDetails : undefined,
     });
-  }, [flowRuntimeNextSteps, currentStep, clearedHumanGateStepIds, activeParallelStep, isParallelReadyToAdvance, feedbackLoopCounts, selectedFlow]);
+  }, [
+    flowRuntimeNextSteps,
+    currentStep,
+    clearedHumanGateStepIds,
+    clearedExternalHandoffStepIds,
+    clearedManualExecutionStepIds,
+    activeParallelStep,
+    isParallelReadyToAdvance,
+    completedParallelStepIds,
+    feedbackLoopCounts,
+    selectedFlow,
+  ]);
 
   const applyResolvedStep = (
     step: ResolvedFlowStepV14,
@@ -1294,6 +1341,33 @@ export default function Home() {
       setCopyStatus(`Human Gate is still waiting for ${step.id}`);
       window.setTimeout(() => setCopyStatus(""), 1800);
       return;
+    }
+
+    if (isExternalHandoffStep(step) && !clearedExternalHandoffStepIds.includes(step.id)) {
+      setCopyStatus(`External handoff is still waiting for ${step.id}`);
+      window.setTimeout(() => setCopyStatus(""), 1800);
+      return;
+    }
+
+    if (step.type === "manual_execution" && !clearedManualExecutionStepIds.includes(step.id)) {
+      setCopyStatus(`Manual execution is still waiting for ${step.id}`);
+      window.setTimeout(() => setCopyStatus(""), 1800);
+      return;
+    }
+
+    if (isParallelStep(step) && !isParallelReadyToAdvance) {
+      setCopyStatus(`Parallel tasks are not complete for ${step.id}`);
+      window.setTimeout(() => setCopyStatus(""), 1800);
+      return;
+    }
+
+    if (step.type === "join" && isFlowV14(selectedFlow)) {
+      const previousStep = findPreviousRouteStep(selectedFlow, step);
+      if (previousStep && isParallelStep(previousStep) && !completedParallelStepIds.includes(previousStep.id)) {
+        setCopyStatus(`Join is waiting for ${previousStep.id}`);
+        window.setTimeout(() => setCopyStatus(""), 1800);
+        return;
+      }
     }
 
     const newState = options?.stateOverride ?? step.state_to ?? flowRuntimeState.state;
@@ -1343,6 +1417,9 @@ export default function Home() {
     if (!activeParallelStep || !parallelRuntimeState) return;
     if (!isParallelReadyToAdvance) return;
 
+    setCompletedParallelStepIds((current) =>
+      current.includes(activeParallelStep.id) ? current : [...current, activeParallelStep.id]
+    );
     applyResolvedStep(activeParallelStep);
     setParallelRuntimeState(null);
   };
@@ -1409,6 +1486,29 @@ export default function Home() {
     }
   };
 
+  const isCurrentStepCompleteDisabled = useMemo(() => {
+    if (!currentStep || !isFlowV14(selectedFlow)) return true;
+    if (completedStepIds.includes(currentStep.id)) return true;
+    if (currentStep.human_gate && !clearedHumanGateStepIds.includes(currentStep.id)) return true;
+    if (isExternalHandoffStep(currentStep) && !clearedExternalHandoffStepIds.includes(currentStep.id)) return true;
+    if (currentStep.type === "manual_execution" && !clearedManualExecutionStepIds.includes(currentStep.id)) return true;
+    if (isParallelStep(currentStep) && !isParallelReadyToAdvance) return true;
+    if (currentStep.type === "join") {
+      const previousStep = findPreviousRouteStep(selectedFlow, currentStep);
+      if (previousStep && isParallelStep(previousStep) && !completedParallelStepIds.includes(previousStep.id)) return true;
+    }
+    return false;
+  }, [
+    currentStep,
+    selectedFlow,
+    completedStepIds,
+    clearedHumanGateStepIds,
+    clearedExternalHandoffStepIds,
+    clearedManualExecutionStepIds,
+    isParallelReadyToAdvance,
+    completedParallelStepIds,
+  ]);
+
   const copyStepText = (step: ResolvedFlowStepV14) => {
     const text = isExternalHandoffStep(step)
       ? buildExternalHandoffText(step)
@@ -1443,6 +1543,9 @@ export default function Home() {
     setFeedbackLoopCounts(createEmptyFeedbackLoopCounts());
     setCompletedStepIds([]);
     setClearedHumanGateStepIds([]);
+    setClearedExternalHandoffStepIds([]);
+    setClearedManualExecutionStepIds([]);
+    setCompletedParallelStepIds([]);
     setCurrentStepId(null);
   }, [selectedFlowId]);
 
@@ -2537,13 +2640,11 @@ export default function Home() {
                             {step.type || "(no type)"} / state_to: {step.state_to || "(none)"} / route_context: {step.route_context || "(none)"}
                           </div>
                           <div style={{ marginTop: "8px", display: "flex", gap: "8px", flexWrap: "wrap" }}>
-                            {step.human_gate ? (
-                              <button type="button" onClick={() => applyResolvedStep(step)}>
-                                Approve human gate
-                              </button>
+                            {step.decision_key ? (
+                              <div style={{ color: "#555" }}>Use Decision Control for this step.</div>
                             ) : (
-                              <button type="button" onClick={() => applyResolvedStep(step)}>
-                                Advance to step
+                              <button type="button" onClick={() => applyResolvedStep(step)} disabled={step.id === currentStep?.id && isCurrentStepCompleteDisabled}>
+                                {step.human_gate ? "Complete gated step" : "Advance to step"}
                               </button>
                             )}
                             {isExternalHandoffStep(step) && (
@@ -2640,6 +2741,9 @@ export default function Home() {
                         setCurrentStepId(null);
                         setCompletedStepIds([]);
                         setClearedHumanGateStepIds([]);
+                        setClearedExternalHandoffStepIds([]);
+                        setClearedManualExecutionStepIds([]);
+                        setCompletedParallelStepIds([]);
                         setFeedbackLoopCounts(createEmptyFeedbackLoopCounts());
                         setParallelRuntimeState(null);
                         setRuntimeActionLogs(newLogs);
@@ -2650,22 +2754,22 @@ export default function Home() {
                     >
                       ↻ Runtime Reset
                     </button>
-                    {currentStep && (
+                    {currentStep && !currentStep.decision_key && !isParallelStep(currentStep) && currentStep.type !== "join" && (
                       <button
                         onClick={() => {
                           applyResolvedStep(currentStep);
                           setCopyStatus(`Step ${currentStep.id} completed`);
                           setTimeout(() => setCopyStatus(""), 1800);
                         }}
-                        disabled={completedStepIds.includes(currentStep.id) || (currentStep.human_gate && !clearedHumanGateStepIds.includes(currentStep.id))}
+                        disabled={isCurrentStepCompleteDisabled}
                         style={{
                           padding: "6px 12px",
                           fontSize: "0.85em",
-                          backgroundColor: completedStepIds.includes(currentStep.id) || (currentStep.human_gate && !clearedHumanGateStepIds.includes(currentStep.id)) ? "#e9ecef" : "#51cf66",
-                          color: completedStepIds.includes(currentStep.id) || (currentStep.human_gate && !clearedHumanGateStepIds.includes(currentStep.id)) ? "#666" : "#fff",
+                          backgroundColor: isCurrentStepCompleteDisabled ? "#e9ecef" : "#51cf66",
+                          color: isCurrentStepCompleteDisabled ? "#666" : "#fff",
                           border: "none",
                           borderRadius: "4px",
-                          cursor: completedStepIds.includes(currentStep.id) || (currentStep.human_gate && !clearedHumanGateStepIds.includes(currentStep.id)) ? "not-allowed" : "pointer",
+                          cursor: isCurrentStepCompleteDisabled ? "not-allowed" : "pointer",
                         }}
                       >
                         ✓ Complete {currentStep.id}
@@ -2740,14 +2844,17 @@ export default function Home() {
                             if (step) {
                               const result = applyDecisionStep(step, selectedFlow, decision as "pass" | "conditional" | "reject");
                               const nextState = result.state_to || flowRuntimeState.state;
-                              const nextCompletedStepIds = completedStepIds.includes(step.id)
-                                ? completedStepIds
-                                : [...completedStepIds, step.id];
-                              const nextStep = findRuntimeCurrentStep(
-                                selectedFlow,
-                                { state: nextState, routeContext: flowRuntimeState.routeContext },
-                                nextCompletedStepIds
-                              );
+                              const canAdvanceDecision = decision === "pass";
+                              const nextCompletedStepIds = canAdvanceDecision && !completedStepIds.includes(step.id)
+                                ? [...completedStepIds, step.id]
+                                : completedStepIds;
+                              const nextStep = canAdvanceDecision
+                                ? findRuntimeCurrentStep(
+                                    selectedFlow,
+                                    { state: nextState, routeContext: flowRuntimeState.routeContext },
+                                    nextCompletedStepIds
+                                  )
+                                : step;
                               const newLogs = addActionLog(
                                 runtimeActionLogs,
                                 `Decision: ${decision}`,
@@ -2756,7 +2863,7 @@ export default function Home() {
                                 nextState,
                                 flowRuntimeState.routeContext,
                                 step.id,
-                                result.to ? `decision to: ${result.to}` : undefined
+                                result.to ? `decision to: ${result.to}${canAdvanceDecision ? "" : " (advance blocked)"}` : undefined
                               );
                               setFlowRuntimeState({
                                 state: nextState,
@@ -2790,7 +2897,7 @@ export default function Home() {
               )}
 
               {/* 5. Verified Condition Inputs */}
-              {routingResolution?.specialRefs.includes("ControlReview") && (
+              {runtimeRoutingResolution && hasControlReviewSpecialRefs(runtimeRoutingResolution) && (
                 <div style={{ marginBottom: "16px", padding: "12px", backgroundColor: "#fff", borderRadius: "4px", border: "1px solid #cce5ff" }}>
                   <div style={{ fontSize: "0.95em", fontWeight: "bold", marginBottom: "8px" }}>✅ Verified 条件</div>
                   <div style={{ display: "grid", gap: "8px" }}>
@@ -2817,6 +2924,19 @@ export default function Home() {
                         ✓ すべての条件を満たしています。Verified transition が優先されます。
                       </div>
                     )}
+                    {runtimeControlReviewResolution?.kind === "verified" && (
+                      <button
+                        onClick={() => applyControlReviewResolution(runtimeControlReviewResolution)}
+                        style={{ marginTop: "8px", padding: "6px 12px", fontSize: "0.85em", backgroundColor: "#51cf66", color: "#fff", border: "none", borderRadius: "4px", cursor: "pointer" }}
+                      >
+                        Apply Verified Transition
+                      </button>
+                    )}
+                    {runtimeControlReviewResolution?.kind === "unresolved" && (
+                      <div style={{ color: "#b33", fontSize: "0.85em" }}>
+                        unresolved: {runtimeControlReviewResolution.unresolvedReason}
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
@@ -2834,6 +2954,17 @@ export default function Home() {
                           onChange={(e) => {
                             const updated = updateParallelTaskStatus(parallelRuntimeState, task.id, e.target.checked);
                             setParallelRuntimeState(updated);
+                            const newLogs = addActionLog(
+                              runtimeActionLogs,
+                              e.target.checked ? `Parallel Task Completed: ${task.target}` : `Parallel Task Reopened: ${task.target}`,
+                              flowRuntimeState.state,
+                              flowRuntimeState.routeContext,
+                              flowRuntimeState.state,
+                              flowRuntimeState.routeContext,
+                              activeParallelStep.id,
+                              task.id
+                            );
+                            setRuntimeActionLogs(newLogs);
                           }}
                         />
                         <span>{task.target}</span>
@@ -2852,6 +2983,38 @@ export default function Home() {
                       </div>
                     )}
                   </div>
+                </div>
+              )}
+
+              {currentStep?.type === "join" && (
+                <div style={{ marginBottom: "16px", padding: "12px", backgroundColor: "#fff", borderRadius: "4px", border: "1px solid #cce5ff" }}>
+                  <div style={{ fontSize: "0.95em", fontWeight: "bold", marginBottom: "8px" }}>Join Control</div>
+                  {(() => {
+                    const previousStep = findPreviousRouteStep(selectedFlow, currentStep);
+                    const previousParallelComplete = !!previousStep && isParallelStep(previousStep) && completedParallelStepIds.includes(previousStep.id);
+                    return (
+                      <div style={{ display: "grid", gap: "8px", fontSize: "0.85em" }}>
+                        <div>Previous parallel step: {previousStep?.id || "(none)"}</div>
+                        <div>Status: {previousParallelComplete ? "Debugger / Infra complete" : "waiting for Debugger / Infra"}</div>
+                        <button
+                          onClick={() => applyResolvedStep(currentStep)}
+                          disabled={isCurrentStepCompleteDisabled}
+                          style={{
+                            marginTop: "4px",
+                            padding: "6px 12px",
+                            fontSize: "0.85em",
+                            backgroundColor: isCurrentStepCompleteDisabled ? "#e9ecef" : "#51cf66",
+                            color: isCurrentStepCompleteDisabled ? "#666" : "#fff",
+                            border: "none",
+                            borderRadius: "4px",
+                            cursor: isCurrentStepCompleteDisabled ? "not-allowed" : "pointer",
+                          }}
+                        >
+                          Complete Join
+                        </button>
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
 
@@ -2877,6 +3040,11 @@ export default function Home() {
                               currentStepId || undefined,
                               "External handoff cleared"
                             );
+                            if (currentStepId) {
+                              setClearedExternalHandoffStepIds((current) =>
+                                current.includes(currentStepId) ? current : [...current, currentStepId]
+                              );
+                            }
                             setRuntimeActionLogs(newLogs);
                             setCopyStatus("External Handoff completed");
                             setTimeout(() => setCopyStatus(""), 1800);
@@ -2902,6 +3070,11 @@ export default function Home() {
                               currentStepId || undefined,
                               "Manual execution cleared"
                             );
+                            if (currentStepId) {
+                              setClearedManualExecutionStepIds((current) =>
+                                current.includes(currentStepId) ? current : [...current, currentStepId]
+                              );
+                            }
                             setRuntimeActionLogs(newLogs);
                             setCopyStatus("Manual Execution completed");
                             setTimeout(() => setCopyStatus(""), 1800);
