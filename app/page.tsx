@@ -1182,6 +1182,11 @@ export default function Home() {
     }
   }, [selectedFlow]);
 
+  const currentStep = useMemo(() => {
+    if (!isFlowV14(selectedFlow) || !currentStepId) return null;
+    return selectedFlow.main_flow?.find(step => step.id === currentStepId) || null;
+  }, [selectedFlow, currentStepId]);
+
   const activeParallelStep = useMemo(() => {
     return flowRuntimeNextSteps.find(isParallelStep);
   }, [flowRuntimeNextSteps]);
@@ -2575,6 +2580,57 @@ export default function Home() {
                     >
                       ↻ Runtime Reset
                     </button>
+                    {currentStep && (
+                      <button
+                        onClick={() => {
+                          // Complete current step and advance
+                          const newLogs = addActionLog(
+                            runtimeActionLogs,
+                            `Step Completed: ${currentStep.id}`,
+                            flowRuntimeState.state,
+                            flowRuntimeState.routeContext,
+                            currentStep.state_to || flowRuntimeState.state,
+                            flowRuntimeState.routeContext,
+                            currentStep.id
+                          );
+                          setFlowRuntimeState({
+                            state: currentStep.state_to || flowRuntimeState.state,
+                            routeContext: flowRuntimeState.routeContext,
+                          });
+                          // Set next step as current
+                          const nextStep = flowRuntimeNextSteps[0];
+                          setCurrentStepId(nextStep?.id || null);
+                          setRuntimeActionLogs(newLogs);
+                          setCopyStatus(`Step ${currentStep.id} completed`);
+                          setTimeout(() => setCopyStatus(""), 1800);
+                        }}
+                        style={{ padding: "6px 12px", fontSize: "0.85em", backgroundColor: "#51cf66", color: "#fff", border: "none", borderRadius: "4px", cursor: "pointer" }}
+                      >
+                        ✓ Complete {currentStep.id}
+                      </button>
+                    )}
+                    {guardStatus.humanGateWaiting && currentStep && (
+                      <button
+                        onClick={() => {
+                          const newLogs = addActionLog(
+                            runtimeActionLogs,
+                            "Human Gate Completed",
+                            flowRuntimeState.state,
+                            flowRuntimeState.routeContext,
+                            flowRuntimeState.state,
+                            flowRuntimeState.routeContext,
+                            currentStep.id,
+                            "Human gate cleared"
+                          );
+                          setRuntimeActionLogs(newLogs);
+                          setCopyStatus("Human Gate completed");
+                          setTimeout(() => setCopyStatus(""), 1800);
+                        }}
+                        style={{ padding: "6px 12px", fontSize: "0.85em", backgroundColor: "#ffd43b", color: "#000", border: "none", borderRadius: "4px", cursor: "pointer" }}
+                      >
+                        👤 Human Gate OK
+                      </button>
+                    )}
                   </div>
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
                     <div>
@@ -2730,8 +2786,56 @@ export default function Home() {
                   <div style={{ display: "grid", gap: "6px", fontSize: "0.85em" }}>
                     {guardStatus.templateUnresolved && <div style={{ color: "#d32f2f" }}>⚠ Template Unresolved</div>}
                     {guardStatus.humanGateWaiting && <div style={{ color: "#f57c00" }}>⏸ Human Gate 待ち</div>}
-                    {guardStatus.externalHandoffWaiting && <div style={{ color: "#f57c00" }}>⏸ External Handoff 待ち</div>}
-                    {guardStatus.manualExecutionWaiting && <div style={{ color: "#f57c00" }}>⏸ Manual Execution 待ち</div>}
+                    {guardStatus.externalHandoffWaiting && (
+                      <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <span style={{ color: "#f57c00" }}>⏸ External Handoff 待ち</span>
+                        <button
+                          onClick={() => {
+                            const newLogs = addActionLog(
+                              runtimeActionLogs,
+                              "External Handoff Completed",
+                              flowRuntimeState.state,
+                              flowRuntimeState.routeContext,
+                              flowRuntimeState.state,
+                              flowRuntimeState.routeContext,
+                              currentStepId || undefined,
+                              "External handoff cleared"
+                            );
+                            setRuntimeActionLogs(newLogs);
+                            setCopyStatus("External Handoff completed");
+                            setTimeout(() => setCopyStatus(""), 1800);
+                          }}
+                          style={{ padding: "4px 8px", fontSize: "0.75em", backgroundColor: "#51cf66", color: "#fff", border: "none", borderRadius: "3px", cursor: "pointer" }}
+                        >
+                          ✓ Complete
+                        </button>
+                      </div>
+                    )}
+                    {guardStatus.manualExecutionWaiting && (
+                      <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <span style={{ color: "#f57c00" }}>⏸ Manual Execution 待ち</span>
+                        <button
+                          onClick={() => {
+                            const newLogs = addActionLog(
+                              runtimeActionLogs,
+                              "Manual Execution Completed",
+                              flowRuntimeState.state,
+                              flowRuntimeState.routeContext,
+                              flowRuntimeState.state,
+                              flowRuntimeState.routeContext,
+                              currentStepId || undefined,
+                              "Manual execution cleared"
+                            );
+                            setRuntimeActionLogs(newLogs);
+                            setCopyStatus("Manual Execution completed");
+                            setTimeout(() => setCopyStatus(""), 1800);
+                          }}
+                          style={{ padding: "4px 8px", fontSize: "0.75em", backgroundColor: "#51cf66", color: "#fff", border: "none", borderRadius: "3px", cursor: "pointer" }}
+                        >
+                          ✓ Complete
+                        </button>
+                      </div>
+                    )}
                     {guardStatus.joinIncomplete && <div style={{ color: "#f57c00" }}>⏸ Join 未完了</div>}
                   </div>
                 </div>
