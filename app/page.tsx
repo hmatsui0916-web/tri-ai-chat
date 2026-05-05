@@ -151,6 +151,8 @@ type ControlReviewDecision = {
   verified: boolean;
   cause?: ControlCause;
   reason?: string;
+  codeChangeRequired?: boolean;
+  reclassifyCause?: "implementation" | "specification";
 };
 
 type FlowRuntimeState = {
@@ -833,6 +835,16 @@ function resolveControlReviewRuntime(
     return { kind: "unresolved", unresolvedReason: "cause が指定されていません。" };
   }
 
+  if (decision.cause === "environment" && decision.codeChangeRequired) {
+    if (!decision.reclassifyCause) {
+      return {
+        kind: "unresolved",
+        unresolvedReason: "Environment fallback requires reclassify_cause selection.",
+      };
+    }
+    return resolveFeedbackBranch(flow, decision.reclassifyCause);
+  }
+
   if (decision.cause === "implementation" || decision.cause === "specification" || decision.cause === "environment") {
     return resolveFeedbackBranch(flow, decision.cause);
   }
@@ -1055,6 +1067,9 @@ export default function Home() {
   const [feedbackLoopCounts, setFeedbackLoopCounts] = useState<FeedbackLoopCounts>(createEmptyFeedbackLoopCounts());
   const [controlVerified, setControlVerified] = useState(false);
   const [controlCause, setControlCause] = useState<ControlCause>("implementation");
+  const [codeChangeRequired, setCodeChangeRequired] = useState(false);
+  const [reclassifyCause, setReclassifyCause] = useState<"implementation" | "specification" | null>(null);
+  const [lastTransitionTo, setLastTransitionTo] = useState<string | null>(null);
   // U-FLOW-08R1: Extended runtime state
   const [currentStepId, setCurrentStepId] = useState<string | null>(null);
   const [selectedDecision, setSelectedDecision] = useState<"pass" | "conditional" | "reject" | null>(null);
@@ -1064,8 +1079,6 @@ export default function Home() {
     acceptanceCriteriaMet: false,
     integratorCauseReviewCompleted: false,
   });
-  const [codeChangeRequired, setCodeChangeRequired] = useState(false);
-  const [reclassifyCause, setReclassifyCause] = useState<"implementation" | "specification" | null>(null);
   const [runtimeActionLogs, setRuntimeActionLogs] = useState<RuntimeActionLog[]>([]);
   const [guardStatus, setGuardStatus] = useState<RuntimeGuardStatus>({
     templateUnresolved: false,
@@ -1128,10 +1141,12 @@ export default function Home() {
   const controlReviewResolution = useMemo(() => {
     if (!isFlowV14(selectedFlow) || !routingResolution) return null;
     return resolveControlReviewRuntime(selectedFlow, routingResolution, {
-      verified: controlVerified,
+      verified: controlVerified || isVerifiedConditionMet(verifiedConditionInputs),
       cause: controlVerified ? undefined : controlCause,
+      codeChangeRequired,
+      reclassifyCause: controlCause === "environment" ? reclassifyCause ?? undefined : undefined,
     });
-  }, [selectedFlow, routingResolution, controlVerified, controlCause]);
+  }, [selectedFlow, routingResolution, controlVerified, controlCause, codeChangeRequired, reclassifyCause, verifiedConditionInputs]);
 
   const flowRuntimeNextSteps = useMemo(() => {
     if (!isFlowV14(selectedFlow)) return [] as ResolvedFlowStepV14[];
@@ -2253,49 +2268,93 @@ export default function Home() {
                           </select>
                         </label>
                       </div>
-
-                      {controlReviewResolution ? (
-                        <div style={{ lineHeight: 1.6 }}>
-                          <div>kind: {controlReviewResolution.kind}</div>
-                          {controlReviewResolution.kind === "verified" && (
-                            <>
-                              <div>nextStepId: {controlReviewResolution.nextStepId || "(none)"}</div>
-                              <div>state_from: {controlReviewResolution.state_from || "(none)"}</div>
-                              <div>state_to: {controlReviewResolution.state_to || "(none)"}</div>
-                              <div>route_context_reset: {controlReviewResolution.route_context_reset || "(none)"}</div>
-                              <button
-                                type="button"
-                                onClick={() => applyControlReviewResolution(controlReviewResolution)}
-                                style={{ marginTop: "8px" }}
+                      <div style={{ display: "grid", gap: "8px" }}>
+                        <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.9em", cursor: "pointer" }}>
+                          <input
+                            type="checkbox"
+                            checked={codeChangeRequired}
+                            onChange={(e) => {
+                              setCodeChangeRequired(e.target.checked);
+                              if (!e.target.checked) {
+                                setReclassifyCause(null);
+                              }
+                            }}
+                          />
+                          <span>code_change_required</span>
+                        </label>
+                        {controlCause === "environment" && codeChangeRequired && (
+                          <div style={{ display: "grid", gap: "6px" }}>
+                            <label style={{ fontSize: "0.9em" }}>
+                              reclassify_cause
+                              <select
+                                value={reclassifyCause ?? ""}
+                                onChange={(e) => setReclassifyCause((e.target.value as "implementation" | "specification") || null)}
+                                style={{ width: "100%", marginTop: "4px", padding: "4px" }}
                               >
-                                Apply verified transition
-                              </button>
-                            </>
-                          )}
-                          {controlReviewResolution.kind === "feedback_branch" && (
-                            <>
-                              <div>branchKey: {controlReviewResolution.branchKey}</div>
-                              <div>route_context: {controlReviewResolution.route_context || "(none)"}</div>
-                              <div>state_rollback_to: {controlReviewResolution.state_rollback_to || "(none)"}</div>
-                              <div>firstStepId: {controlReviewResolution.firstStepId || "(none)"}</div>
-                              {controlReviewResolution.firstStep && (
-                                <div style={{ marginLeft: "10px" }}>
-                                  firstStep: {controlReviewResolution.firstStep.id} / {controlReviewResolution.firstStep.name || controlReviewResolution.firstStep.type || controlReviewResolution.firstStep.route_context || "(no label)"}
-                                </div>
-                              )}
-                            </>
-                          )}
-                          {controlReviewResolution.kind === "unresolved" && (
-                            <div style={{ color: "#b33" }}>unresolved: {controlReviewResolution.unresolvedReason}</div>
-                          )}
-                          {controlReviewResolution.kind === "not_applicable" && (
-                            <div>not applicable: ControlReview specialRefs が含まれていません。</div>
-                          )}
-                        </div>
-                      ) : (
-                        <div style={{ marginLeft: "10px" }}>ControlReview preview unavailable</div>
-                      )}
+                                <option value="">-- select --</option>
+                                <option value="implementation">implementation</option>
+                                <option value="specification">specification</option>
+                              </select>
+                            </label>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (reclassifyCause) {
+                                  setControlCause(reclassifyCause);
+                                  setCopyStatus(`Reclassify cause: ${reclassifyCause} を適用しました。`);
+                                  window.setTimeout(() => setCopyStatus(""), 1800);
+                                }
+                              }}
+                              disabled={!reclassifyCause}
+                              style={{ padding: "6px 12px", fontSize: "0.85em", backgroundColor: reclassifyCause ? "#339af0" : "#e9ecef", color: reclassifyCause ? "#fff" : "#666", border: "none", borderRadius: "4px", cursor: reclassifyCause ? "pointer" : "not-allowed" }}
+                            >
+                              Apply reclassification
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     </div>
+                    {controlReviewResolution ? (
+                      <div style={{ lineHeight: 1.6 }}>
+                        <div>kind: {controlReviewResolution.kind}</div>
+                        {controlReviewResolution.kind === "verified" && (
+                          <>
+                            <div>nextStepId: {controlReviewResolution.nextStepId || "(none)"}</div>
+                            <div>state_from: {controlReviewResolution.state_from || "(none)"}</div>
+                            <div>state_to: {controlReviewResolution.state_to || "(none)"}</div>
+                            <div>route_context_reset: {controlReviewResolution.route_context_reset || "(none)"}</div>
+                            <button
+                              type="button"
+                              onClick={() => applyControlReviewResolution(controlReviewResolution)}
+                              style={{ marginTop: "8px" }}
+                            >
+                              Apply verified transition
+                            </button>
+                          </>
+                        )}
+                        {controlReviewResolution.kind === "feedback_branch" && (
+                          <>
+                            <div>branchKey: {controlReviewResolution.branchKey}</div>
+                            <div>route_context: {controlReviewResolution.route_context || "(none)"}</div>
+                            <div>state_rollback_to: {controlReviewResolution.state_rollback_to || "(none)"}</div>
+                            <div>firstStepId: {controlReviewResolution.firstStepId || "(none)"}</div>
+                            {controlReviewResolution.firstStep && (
+                              <div style={{ marginLeft: "10px" }}>
+                                firstStep: {controlReviewResolution.firstStep.id} / {controlReviewResolution.firstStep.name || controlReviewResolution.firstStep.type || controlReviewResolution.firstStep.route_context || "(no label)"}
+                              </div>
+                            )}
+                          </>
+                        )}
+                        {controlReviewResolution.kind === "unresolved" && (
+                          <div style={{ color: "#b33" }}>unresolved: {controlReviewResolution.unresolvedReason}</div>
+                        )}
+                        {controlReviewResolution.kind === "not_applicable" && (
+                          <div>not applicable: ControlReview specialRefs が含まれていません。</div>
+                        )}
+                      </div>
+                    ) : (
+                      <div style={{ marginLeft: "10px" }}>ControlReview preview unavailable</div>
+                    )}
                   </div>
                 )}
 
@@ -2498,46 +2557,50 @@ export default function Home() {
               {flowRuntimeNextSteps.some((s) => s.decision_key === "review_decision") && (
                 <div style={{ marginBottom: "16px", padding: "12px", backgroundColor: "#fff", borderRadius: "4px", border: "1px solid #cce5ff" }}>
                   <div style={{ fontSize: "0.95em", fontWeight: "bold", marginBottom: "8px" }}>🎯 Decision Control</div>
-                  <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-                    {(["pass", "conditional", "reject"] as const).map((decision) => (
-                      <button
-                        key={decision}
-                        onClick={() => {
-                          const step = flowRuntimeNextSteps.find((s) => s.decision_key === "review_decision");
-                          if (step) {
-                            const result = applyDecisionStep(step, selectedFlow, decision);
-                            const newLogs = addActionLog(
-                              runtimeActionLogs,
-                              `Decision: ${decision}`,
-                              flowRuntimeState.state,
-                              flowRuntimeState.routeContext,
-                              result.state_to || flowRuntimeState.state,
-                              flowRuntimeState.routeContext,
-                              step.id
-                            );
-                            setFlowRuntimeState({
-                              state: result.state_to || flowRuntimeState.state,
-                              routeContext: flowRuntimeState.routeContext,
-                            });
-                            setSelectedDecision(decision);
-                            setRuntimeActionLogs(newLogs);
-                            setCopyStatus(`Decision: ${decision} を選択しました。`);
-                            window.setTimeout(() => setCopyStatus(""), 1800);
-                          }
-                        }}
-                        style={{
-                          padding: "6px 12px",
-                          fontSize: "0.85em",
-                          backgroundColor: decision === selectedDecision ? "#51cf66" : "#e7f5ff",
-                          color: decision === selectedDecision ? "#fff" : "#0066cc",
-                          border: `1px solid ${decision === selectedDecision ? "#37b24d" : "#0066cc"}`,
-                          borderRadius: "4px",
-                          cursor: "pointer",
-                        }}
-                      >
-                        {decision}
-                      </button>
-                    ))}
+                  <div style={{ display: "grid", gap: "10px" }}>
+                    <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                      {["pass", "conditional", "reject"].map((decision) => (
+                        <button
+                          key={decision}
+                          onClick={() => {
+                            const step = flowRuntimeNextSteps.find((s) => s.decision_key === "review_decision");
+                            if (step) {
+                              const result = applyDecisionStep(step, selectedFlow, decision as "pass" | "conditional" | "reject");
+                              const newLogs = addActionLog(
+                                runtimeActionLogs,
+                                `Decision: ${decision}`,
+                                flowRuntimeState.state,
+                                flowRuntimeState.routeContext,
+                                result.state_to || flowRuntimeState.state,
+                                flowRuntimeState.routeContext,
+                                step.id,
+                                result.to ? `decision to: ${result.to}` : undefined
+                              );
+                              setFlowRuntimeState({
+                                state: result.state_to || flowRuntimeState.state,
+                                routeContext: flowRuntimeState.routeContext,
+                              });
+                              setLastTransitionTo(result.to || null);
+                              setSelectedDecision(decision as "pass" | "conditional" | "reject");
+                              setRuntimeActionLogs(newLogs);
+                              setCopyStatus(`Decision: ${decision} selected`);
+                              setTimeout(() => setCopyStatus(""), 1800);
+                            }
+                          }}
+                          style={{
+                            padding: "6px 12px",
+                            fontSize: "0.85em",
+                            backgroundColor: decision === selectedDecision ? "#51cf66" : "#e7f5ff",
+                            color: decision === selectedDecision ? "#fff" : "#0066cc",
+                            border: `1px solid ${decision === selectedDecision ? "#37b24d" : "#0066cc"}`,
+                            borderRadius: "4px",
+                            cursor: "pointer",
+                          }}
+                        >
+                          {decision}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 </div>
               )}
@@ -2632,6 +2695,7 @@ export default function Home() {
                         <div><strong>{log.action}</strong> - {new Date(log.timestamp).toLocaleTimeString("ja-JP")}</div>
                         <div>{log.beforeState}/{log.beforeRouteContext} → {log.afterState}/{log.afterRouteContext}</div>
                         {log.stepId && <div>Step: {log.stepId}</div>}
+                        {log.note && <div>Note: {log.note}</div>}
                       </div>
                     ))}
                   </div>
