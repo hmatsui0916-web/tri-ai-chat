@@ -3022,6 +3022,78 @@ export default function Home() {
                         Apply Verified Transition
                       </button>
                     )}
+                    {runtimeControlReviewResolution?.kind !== "verified" && (
+                      <div style={{ marginTop: "8px", padding: "10px", border: "1px solid #ffd8a8", borderRadius: "4px", backgroundColor: "#fff9db", display: "grid", gap: "8px" }}>
+                        <div style={{ fontWeight: "bold", fontSize: "0.9em" }}>Cause Classification</div>
+                        <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                          {(["implementation", "specification", "environment"] as ControlCause[]).map((cause) => (
+                            <button
+                              key={cause}
+                              onClick={() => {
+                                setControlCause(cause);
+                                if (cause !== "environment") {
+                                  setCodeChangeRequired(false);
+                                  setReclassifyCause(null);
+                                }
+                              }}
+                              style={{
+                                padding: "6px 10px",
+                                fontSize: "0.85em",
+                                backgroundColor: controlCause === cause ? "#f08c00" : "#fff4e6",
+                                color: controlCause === cause ? "#fff" : "#9c5a00",
+                                border: `1px solid ${controlCause === cause ? "#e67700" : "#ffd8a8"}`,
+                                borderRadius: "4px",
+                                cursor: "pointer",
+                              }}
+                            >
+                              {cause}
+                            </button>
+                          ))}
+                        </div>
+                        {controlCause === "environment" && (
+                          <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.85em", cursor: "pointer" }}>
+                            <input
+                              type="checkbox"
+                              checked={codeChangeRequired}
+                              onChange={(e) => {
+                                setCodeChangeRequired(e.target.checked);
+                                if (!e.target.checked) {
+                                  setReclassifyCause(null);
+                                }
+                              }}
+                            />
+                            <span>code_change_required</span>
+                          </label>
+                        )}
+                        {controlCause === "environment" && codeChangeRequired && (
+                          <label style={{ display: "grid", gap: "4px", fontSize: "0.85em" }}>
+                            reclassify_cause
+                            <select
+                              value={reclassifyCause ?? ""}
+                              onChange={(e) => setReclassifyCause((e.target.value as "implementation" | "specification") || null)}
+                              style={{ padding: "4px" }}
+                            >
+                              <option value="">-- select --</option>
+                              <option value="implementation">implementation</option>
+                              <option value="specification">specification</option>
+                            </select>
+                          </label>
+                        )}
+                        {runtimeControlReviewResolution?.kind === "feedback_branch" && (
+                          <>
+                            <div style={{ fontSize: "0.85em", color: "#555" }}>
+                              branch: {runtimeControlReviewResolution.branchKey} / next: {runtimeControlReviewResolution.firstStepId || "(none)"}
+                            </div>
+                            <button
+                              onClick={() => applyControlReviewResolution(runtimeControlReviewResolution)}
+                              style={{ padding: "6px 12px", fontSize: "0.85em", backgroundColor: "#f08c00", color: "#fff", border: "none", borderRadius: "4px", cursor: "pointer" }}
+                            >
+                              Apply Feedback Branch
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    )}
                     {runtimeControlReviewResolution?.kind === "unresolved" && (
                       <div style={{ color: "#b33", fontSize: "0.85em" }}>
                         unresolved: {runtimeControlReviewResolution.unresolvedReason}
