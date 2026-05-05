@@ -2898,6 +2898,9 @@ export default function Home() {
               {currentStep?.decision_key === "review_decision" && (
                 <div style={{ marginBottom: "16px", padding: "12px", backgroundColor: "#fff", borderRadius: "4px", border: "1px solid #cce5ff" }}>
                   <div style={{ fontSize: "0.95em", fontWeight: "bold", marginBottom: "8px" }}>🎯 Decision Control</div>
+                  <div style={{ marginBottom: "8px", fontSize: "0.85em", color: "#555" }}>
+                    decision_key: {currentStep.decision_key} / Complete is blocked until a decision is selected.
+                  </div>
                   <div style={{ display: "grid", gap: "10px" }}>
                     <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
                       {["pass", "conditional", "reject"].map((decision) => (
@@ -2908,7 +2911,6 @@ export default function Home() {
                             if (step) {
                               const result = applyDecisionStep(step, selectedFlow, decision as "pass" | "conditional" | "reject");
                               const nextState = result.state_to || flowRuntimeState.state;
-                              const canAdvanceDecision = decision === "pass" || decision === "conditional";
                               const routeSteps = getResolvedStepsForRoute(selectedFlow, flowRuntimeState.routeContext);
                               const previousStep = findPreviousRouteStep(selectedFlow, step);
                               const rollbackCompletedStepIds = previousStep
@@ -2936,7 +2938,7 @@ export default function Home() {
                                 nextState,
                                 flowRuntimeState.routeContext,
                                 step.id,
-                                result.to ? `decision to: ${result.to}` : undefined
+                                result.to ? `decision_key: ${step.decision_key}; decision to: ${result.to}` : `decision_key: ${step.decision_key}`
                               );
                               setFlowRuntimeState({
                                 state: nextState,
