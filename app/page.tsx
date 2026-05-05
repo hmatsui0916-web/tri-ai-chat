@@ -31,6 +31,12 @@ type StagedColumnPrompt = {
   prompt: string;
 };
 
+type StagedStepSummary = {
+  stepId: string;
+  roles: RoleName[];
+  columnIds: ColumnId[];
+};
+
 type SelectedReference = {
   key: ColumnId;
   id: string;
@@ -1620,6 +1626,7 @@ export default function Home() {
   const [pmApprovedSpec, setPmApprovedSpec] = useState(false);
   const [promptGenerationResult, setPromptGenerationResult] = useState<PromptGenerationResult | null>(null);
   const [stagedPromptsByColumn, setStagedPromptsByColumn] = useState<Partial<Record<ColumnId, StagedColumnPrompt[]>>>({});
+  const [stagedStepSummaries, setStagedStepSummaries] = useState<StagedStepSummary[]>([]);
   const [showFlowRuntimePanel, setShowFlowRuntimePanel] = useState(true);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -1734,6 +1741,16 @@ export default function Home() {
   }, [activeParallelStep]);
 
   const isParallelReadyToAdvance = parallelRuntimeState ? isParallelComplete(parallelRuntimeState) : false;
+  const currentStepPromptStaged = useMemo(() => {
+    if (!currentStep) return false;
+    return stagedStepSummaries.some((summary) => summary.stepId === currentStep.id);
+  }, [currentStep, stagedStepSummaries]);
+
+  const currentStepRequiresPromptStage = useMemo(() => {
+    if (!currentStep || !isFlowV14(selectedFlow)) return false;
+    if (currentStep.template_unresolved) return false;
+    return currentStep.type === "join";
+  }, [currentStep, selectedFlow]);
 
   useEffect(() => {
     const templateUnresolved = currentStep?.template_unresolved === true || flowRuntimeNextSteps.some((step) => step.template_unresolved === true);
@@ -1766,7 +1783,7 @@ export default function Home() {
     setGuardStatus({
       templateUnresolved,
       decisionWaiting,
-      humanGateWaiting,
+      humanGateWaiting: humanGateWaiting || (currentStepRequiresPromptStage && !currentStepPromptStaged),
       externalHandoffWaiting,
       manualExecutionWaiting,
       joinIncomplete,
@@ -1784,6 +1801,8 @@ export default function Home() {
     completedParallelStepIds,
     feedbackLoopCounts,
     selectedFlow,
+    currentStepRequiresPromptStage,
+    currentStepPromptStaged,
   ]);
 
   useEffect(() => {
@@ -1902,6 +1921,12 @@ export default function Home() {
 
     if (step.type === "manual_execution" && !clearedManualExecutionStepIds.includes(step.id)) {
       setCopyStatus(`Manual execution is still waiting for ${step.id}`);
+      window.setTimeout(() => setCopyStatus(""), 1800);
+      return;
+    }
+
+    if (step.type === "join" && !stagedStepSummaries.some((summary) => summary.stepId === step.id)) {
+      setCopyStatus(`Prompt staging is still required for ${step.id}`);
       window.setTimeout(() => setCopyStatus(""), 1800);
       return;
     }
@@ -2092,6 +2117,7 @@ export default function Home() {
     if (currentStep.template_unresolved) return true;
     if (completedStepIds.includes(currentStep.id)) return true;
     if (isReviewerDecisionStep(currentStep)) return !selectedDecision;
+    if (currentStepRequiresPromptStage && !currentStepPromptStaged) return true;
     if (currentStep.human_gate && !clearedHumanGateStepIds.includes(currentStep.id)) return true;
     if (isExternalHandoffStep(currentStep) && !clearedExternalHandoffStepIds.includes(currentStep.id)) return true;
     if (currentStep.type === "manual_execution" && !clearedManualExecutionStepIds.includes(currentStep.id)) return true;
@@ -2116,6 +2142,8 @@ export default function Home() {
     isParallelReadyToAdvance,
     completedParallelStepIds,
     selectedDecision,
+    currentStepRequiresPromptStage,
+    currentStepPromptStaged,
   ]);
 
   const copyStepText = (step: ResolvedFlowStepV14) => {
@@ -2203,6 +2231,14 @@ export default function Home() {
       setSendToAll(false);
       setSendTargets(Object.fromEntries(columns.map((column) => [column.id, roleColumnIds.includes(column.id)])));
       setStagedPromptsByColumn((current) => ({ ...current, ...stagedByColumn }));
+      setStagedStepSummaries((current) => [
+        ...current.filter((summary) => summary.stepId !== promptGenerationResult.stepId),
+        {
+          stepId: promptGenerationResult.stepId,
+          roles: promptGenerationResult.targetRoles,
+          columnIds: roleColumnIds,
+        },
+      ]);
       setRuntimeActionLogs((current) =>
         stagedSummaries.reduce(
           (logs, summary) =>
@@ -2255,6 +2291,8 @@ export default function Home() {
     setCurrentStepId(null);
     setPmApprovedSpec(false);
     setPromptGenerationResult(null);
+    setStagedStepSummaries([]);
+    setStagedPromptsByColumn({});
   }, [selectedFlowId]);
 
   useEffect(() => {
@@ -2345,6 +2383,14 @@ export default function Home() {
       setStagedPromptsByColumn((prev) =>
         Object.fromEntries(normalized.map((column) => [column.id, prev[column.id] ?? []]))
       );
+      setStagedStepSummaries((prev) =>
+        prev
+          .map((summary) => ({
+            ...summary,
+            columnIds: summary.columnIds.filter((columnId) => normalized.some((column) => column.id === columnId)),
+          }))
+          .filter((summary) => summary.columnIds.length > 0)
+      );
       setSendTargets(Object.fromEntries(normalized.map((column) => [column.id, true])));
     } catch {
       // ignore
@@ -2412,6 +2458,14 @@ export default function Home() {
       delete next[id];
       return next;
     });
+    setStagedStepSummaries((prev) =>
+      prev
+        .map((summary) => ({
+          ...summary,
+          columnIds: summary.columnIds.filter((columnId) => columnId !== id),
+        }))
+        .filter((summary) => summary.columnIds.length > 0)
+    );
 
     setSendTargets((prev) => {
       const next = { ...prev };
@@ -2666,6 +2720,9 @@ export default function Home() {
       for (const key of activeKeys) next[key] = [];
       return next;
     });
+    setStagedStepSummaries((prev) =>
+      prev.filter((summary) => !activeKeys.some((key) => summary.columnIds.includes(key)))
+    );
     setReferenceMode(false);
     setLoading(true);
     setGlobalError("");
@@ -2744,6 +2801,7 @@ export default function Home() {
     saveColumns(defaultColumns);
     setColumnHistories(createEmptyHistories(defaultColumns));
     setStagedPromptsByColumn({});
+    setStagedStepSummaries([]);
     setSendTargets(Object.fromEntries(defaultColumns.map((column) => [column.id, true])));
     setSelectedReferences([]);
     setPage(0);
@@ -2755,6 +2813,14 @@ export default function Home() {
     if (loading) return;
     setColumnHistories((prev) => ({ ...prev, [id]: [] }));
     setStagedPromptsByColumn((prev) => ({ ...prev, [id]: [] }));
+    setStagedStepSummaries((prev) =>
+      prev
+        .map((summary) => ({
+          ...summary,
+          columnIds: summary.columnIds.filter((columnId) => columnId !== id),
+        }))
+        .filter((summary) => summary.columnIds.length > 0)
+    );
   }
 
   function updateSystemPrompt(id: ColumnId, value: string) {
@@ -3569,6 +3635,8 @@ export default function Home() {
                         setFeedbackLoopCounts(createEmptyFeedbackLoopCounts());
                         setParallelRuntimeState(null);
                         setSelectedDecision(null);
+                        setStagedStepSummaries([]);
+                        setStagedPromptsByColumn({});
                         setRuntimeActionLogs(newLogs);
                         setCopyStatus("Runtime をリセットしました。");
                         window.setTimeout(() => setCopyStatus(""), 1800);
@@ -3599,6 +3667,11 @@ export default function Home() {
                     {guardStatus.humanGateWaiting && currentStep && (
                       <button
                         onClick={() => {
+                          if (currentStepRequiresPromptStage && !currentStepPromptStaged) {
+                            setCopyStatus(`Prompt staging is still required for ${currentStep.id}`);
+                            setTimeout(() => setCopyStatus(""), 1800);
+                            return;
+                          }
                           const newLogs = addActionLog(
                             runtimeActionLogs,
                             "Human Gate Completed",
@@ -3616,7 +3689,16 @@ export default function Home() {
                           setCopyStatus("Human Gate completed");
                           setTimeout(() => setCopyStatus(""), 1800);
                         }}
-                        style={{ padding: "6px 12px", fontSize: "0.85em", backgroundColor: "#ffd43b", color: "#000", border: "none", borderRadius: "4px", cursor: "pointer" }}
+                        disabled={currentStepRequiresPromptStage && !currentStepPromptStaged}
+                        style={{
+                          padding: "6px 12px",
+                          fontSize: "0.85em",
+                          backgroundColor: currentStepRequiresPromptStage && !currentStepPromptStaged ? "#e9ecef" : "#ffd43b",
+                          color: currentStepRequiresPromptStage && !currentStepPromptStaged ? "#666" : "#000",
+                          border: "none",
+                          borderRadius: "4px",
+                          cursor: currentStepRequiresPromptStage && !currentStepPromptStaged ? "not-allowed" : "pointer",
+                        }}
                       >
                         👤 Human Gate OK
                       </button>
@@ -3847,6 +3929,7 @@ export default function Home() {
                       <div style={{ display: "grid", gap: "8px", fontSize: "0.85em" }}>
                         <div>Previous parallel step: {previousStep?.id || "(none)"}</div>
                         <div>Status: {previousParallelComplete ? "Debugger / Infra complete" : "waiting for Debugger / Infra"}</div>
+                        <div>Prompt staged: {currentStepPromptStaged ? "yes" : "no"}</div>
                         <button
                           onClick={() => applyResolvedStep(currentStep)}
                           disabled={isCurrentStepCompleteDisabled}
@@ -3876,6 +3959,9 @@ export default function Home() {
                   <div style={{ display: "grid", gap: "6px", fontSize: "0.85em" }}>
                     {guardStatus.templateUnresolved && <div style={{ color: "#d32f2f" }}>⚠ Template Unresolved</div>}
                     {guardStatus.humanGateWaiting && <div style={{ color: "#f57c00" }}>⏸ Human Gate 待ち</div>}
+                    {currentStepRequiresPromptStage && !currentStepPromptStaged && (
+                      <div style={{ color: "#f57c00" }}>Prompt staging required for {currentStep?.id}</div>
+                    )}
                     {currentStep?.template_unresolved && (
                       <div style={{ color: "#d32f2f" }}>
                         unresolved template_ref: {currentStep.template_ref || "(missing)"}
