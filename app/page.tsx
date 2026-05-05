@@ -1150,21 +1150,37 @@ export default function Home() {
 
   const flowRuntimeNextSteps = useMemo(() => {
     if (!isFlowV14(selectedFlow)) return [] as ResolvedFlowStepV14[];
-    const runtimeRouting = resolveRouting(selectedFlow, flowRuntimeState.state, flowRuntimeState.routeContext);
+    
+    let routingState = flowRuntimeState.state;
+    let routingRouteContext = flowRuntimeState.routeContext;
+    
+    // If currentStepId is set, resolve next steps from the state after current step completion
+    if (currentStepId) {
+      const currentStep = selectedFlow.main_flow?.find(step => step.id === currentStepId);
+      if (currentStep && typeof currentStep.state_to === 'string') {
+        routingState = currentStep.state_to;
+        // Keep route_context the same unless specified
+      }
+    }
+    
+    const runtimeRouting = resolveRouting(selectedFlow, routingState, routingRouteContext);
     return runtimeRouting?.steps ?? [];
-  }, [selectedFlow, flowRuntimeState]);
+  }, [selectedFlow, flowRuntimeState, currentStepId]);
 
   useEffect(() => {
-    // Initialize currentStepId when flow changes or runtime state changes
-    if (isFlowV14(selectedFlow) && flowRuntimeNextSteps.length > 0) {
-      const firstStep = flowRuntimeNextSteps[0];
+    // Initialize currentStepId when flow changes
+    if (isFlowV14(selectedFlow)) {
+      // Set currentStepId to the first step in main_flow
+      const firstStep = selectedFlow.main_flow?.[0];
       if (firstStep && firstStep.id) {
         setCurrentStepId(firstStep.id);
+      } else {
+        setCurrentStepId(null);
       }
     } else {
       setCurrentStepId(null);
     }
-  }, [selectedFlow, flowRuntimeNextSteps]);
+  }, [selectedFlow]);
 
   const activeParallelStep = useMemo(() => {
     return flowRuntimeNextSteps.find(isParallelStep);
