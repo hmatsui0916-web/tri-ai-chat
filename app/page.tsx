@@ -575,8 +575,7 @@ function isReviewerDecisionStep(step: ResolvedFlowStepV14 | null | undefined): b
     !!step &&
     !step.template_unresolved &&
     (step.decision_key === "review_decision" ||
-      step.template_ref === "reviewer_decision_step" ||
-      step.id === "main-04")
+      step.template_ref === "reviewer_decision_step")
   );
 }
 
@@ -1303,6 +1302,8 @@ function resolveTargetRoles(
   flow: FlowDefinitionV14,
   decision?: "pass" | "conditional" | "reject" | null
 ): RoleName[] {
+  if (step.template_unresolved) return [];
+
   if (step.id === "main-05" || step.id === "fb-spec-04") return ["Integrator-S"];
   if (step.id === "main-06" || step.id === "fb-impl-01" || step.id === "fb-spec-05") return ["Worker"];
   if (step.id === "main-09") return ["PM"];
@@ -3555,6 +3556,11 @@ export default function Home() {
                     <div><strong>Current Step:</strong> {currentStep?.id || "(none)"}</div>
                     <div><strong>Resolved Role(s):</strong> {currentStep ? resolveTargetRoles(currentStep, selectedFlow, selectedDecision).join(", ") || "(none)" : "(none)"}</div>
                     <div><strong>External Handoff:</strong> {currentStep && isExternalHandoffStep(currentStep) ? "manual VSCode Copilot handoff" : "no"}</div>
+                    {currentStep?.template_unresolved && (
+                      <div style={{ color: "#b91c1c" }}>
+                        Guard: Template Unresolved / unresolved template_ref: {currentStep.template_ref || "(missing)"}
+                      </div>
+                    )}
                   </div>
                   <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.85em", cursor: "pointer" }}>
                     <input
