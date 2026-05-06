@@ -1,3 +1,4 @@
+File:
 U-FLOW-12_Packet.md
 
 Role: Integrator-S
@@ -7,12 +8,12 @@ Scope: Structure
 
 ## 1. Unit
 
-U-FLOW-12  
+U-FLOW-12
 Artifact Save Runtime
 
 ## 2. Goal
 
-Role OutputをArtifactとして保存し、Flow Runtime上で一覧表示・メタデータ管理・次step Prompt生成時のInput参照に使えるようにする。
+Role OutputをArtifactとして保存し、Flow Runtime上で一覧表示、メタデータ管理、次step Prompt生成時のInput参照に使えるようにする。
 
 U-FLOW-12完了後、Humanは各Role出力を確認し、`File:` 行またはRuntime候補名に基づいてArtifact保存できる。保存済みArtifactはUnit単位で一覧表示され、`runtime_outputs / allowed inputs JSON` へ安全に反映できる。
 
@@ -90,6 +91,7 @@ Workerは以下を実装する。
 - next_step Prompt生成用Inputへの参照・反映UI
 - PMDecision Phase命名
 - PMDecision_Rework TargetRole命名
+- ReworkInstruction TargetRole + timestamp命名
 - 同名衝突時の警告とRev名提案
 
 ## 7. Storage Model
@@ -99,6 +101,24 @@ Workerは以下を実装する。
 `app/page.tsx` にArtifact用型を追加する。
 
 ```ts
+type RuntimeInputKey =
+  | "unit_id"
+  | "human_goal"
+  | "pm_decision"
+  | "review_report"
+  | "spec_content"
+  | "packet_content"
+  | "worker_code"
+  | "debug_report"
+  | "infra_result"
+  | "human_execution_result"
+  | "control_decision"
+  | "rework_instruction"
+  | "infra_test_plan"
+  | "pm_approval_request"
+  | "function_name"
+  | "target";
+
 type ArtifactType =
   | "Decision"
   | "Spec"
@@ -124,7 +144,26 @@ type SavedArtifact = {
   content: string;
   rev?: number;
 };
+
+type ArtifactAnalysisResult = {
+  content: string;
+  extractedFileName: string | null;
+  candidateFileName: string;
+  finalFileName: string;
+  detectedUnitId: string;
+  artifactType: ArtifactType;
+  logicalPath: string;
+  pmDecisionPhase: string | null;
+  targetRole: string | null;
+  rev: number | null;
+  suggestedRevisionFileName: string | null;
+  canSave: boolean;
+  errors: string[];
+  warnings: string[];
+};
 ```
+
+`RuntimeInputKey` は既存 `PromptRuntimeInputs` のkeyと一致させる。Packet内で明示することで、`artifactTypeToDefaultInputKey` や `applyArtifactToRuntimeOutputsText` 実装時の型不一致を避ける。
 
 ### 7.2 Persistence
 
@@ -150,6 +189,8 @@ UI要素:
 - 保存先論理パス
 - current_step / state / route_context
 - Human修正可能なファイル名入力
+- PMDecision Phase手動選択
+- Rework TargetRole手動選択
 - `Artifact Save` ボタン
 - 保存ブロック理由 / 警告表示
 
@@ -187,9 +228,11 @@ Role Output欄は既存の `runtimeOutputsText` を壊さない独立stateにす
 | Spec | `*_Spec.md` | `units/[Unit]/specs/` |
 | Packet | `*_Packet.md` | `units/[Unit]/packets/` |
 | ReworkInstruction | `*_ReworkInstruction_*` | `units/[Unit]/rework/` |
-| Report | `*Report*` or `*Result*` | `units/[Unit]/reports/` |
+| Report | `*Report_*` / `*Result_*` | `units/[Unit]/reports/` |
 | Code | `*_Code.*` | `units/[Unit]/outputs/` |
 | Unknown | otherwise | `units/[Unit]/outputs/` |
+
+Report判定はSpec 2.3に合わせてアンダースコア付きの `*Report_*` / `*Result_*` を基準にする。`ErrorReport.md` や `TestResults.json` のような意図しないファイル名へ広くマッチさせない。
 
 PMDecision_ReworkはReworkInstructionとは別Artifactであり、保存先はPMDecision系として `decisions/` を使う。
 
@@ -233,7 +276,9 @@ Flow stepからの候補:
 
 `WorkerApproval / Conditional / Hold` は保存可能Phaseとして許可する。ただし自動判定対象外の場合は手動選択UIを使う。
 
-### 8.7 PMDecision_Rework TargetRole Naming
+### 8.7 PMDecision_Rework and ReworkInstruction Naming
+
+PMDecision_Rework:
 
 - 形式: `[Unit]_PMDecision_Rework_[TargetRole].md`
 - TargetRole候補:
@@ -243,6 +288,19 @@ Flow stepからの候補:
   - `Infra`
 - `Integrator-S` はファイル名上 `IntegratorS` に正規化する。
 - TargetRole欠落時は保存をブロックし、Human選択を要求する。
+
+ReworkInstruction:
+
+- 形式: `[Unit]_ReworkInstruction_[TargetRole]_[timestamp].md`
+- TargetRole候補:
+  - `Worker`
+  - `Designer`
+  - `Infra`
+- `timestamp` は `yyyymmdd_hhmmss` 形式を推奨する。
+- `File:` 欠落時にArtifact種別がReworkInstructionと推定される場合、この形式で候補名を生成する。
+- TargetRoleまたはtimestampが欠落しているReworkInstruction名は保存前に警告し、候補名へ補正できるようにする。
+
+PMDecision_ReworkはPMの差戻し判断、ReworkInstructionはIntegrator-C等が作成する修正指示であり、両者を混同しない。
 
 ### 8.8 Rev Conflict Handling
 
@@ -321,6 +379,8 @@ Flow stepからの候補:
 8. PhaseなしPMDecision名を保存しない。
 9. `WorkerApproval / Conditional / Hold` は保存可能なPhaseとして保持するが、Flow自動判定対象に無理に含めない。
 10. File name sanitationを行い、ディレクトリトラバーサルを許可しない。
+11. Report判定は `*Report_*` / `*Result_*` に合わせ、曖昧な `*Report*` / `*Result*` 判定へ広げない。
+12. ReworkInstructionは `[Unit]_ReworkInstruction_[TargetRole]_[timestamp].md` 形式を候補名生成と検証に使う。
 
 ## 10. Implementation Skeleton
 
@@ -328,12 +388,16 @@ Flow stepからの候補:
 
 `PromptRuntimeInputs` 周辺に以下を追加する。
 
+- `RuntimeInputKey`
 - `ArtifactType`
 - `SavedArtifact`
 - `ArtifactAnalysisResult`
 - `ARTIFACT_STORAGE_KEY`
 - `PM_DECISION_PHASES`
 - `REWORK_TARGET_ROLES`
+- `REWORK_INSTRUCTION_TARGET_ROLES`
+
+`RuntimeInputKey` はSection 7.1のunion typeを使用する。
 
 ### 10.2 Pure Functions
 
@@ -347,14 +411,39 @@ function detectArtifactType(fileName: string): ArtifactType
 function getLogicalFolder(unitId: string, artifactType: ArtifactType): string
 function inferPmDecisionPhase(step: ResolvedFlowStepV14 | null, fileName: string): string | null
 function normalizeTargetRoleForFileName(role: string): string
-function buildCandidateArtifactFileName(...)
+function buildCandidateArtifactFileName(
+  artifactType: ArtifactType,
+  unitId: string,
+  step: ResolvedFlowStepV14 | null,
+  phase: string | null,
+  targetRole: string | null,
+  timestamp: string
+): string
+function buildReworkInstructionCandidateFileName(
+  unitId: string,
+  targetRole: "Worker" | "Designer" | "Infra",
+  timestamp: string
+): string
 function parseRevision(fileName: string): number | null
 function suggestRevisionFileName(fileName: string, existing: SavedArtifact[], logicalPath: string): string
-function analyzeArtifactOutput(...)
+function analyzeArtifactOutput(
+  content: string,
+  inputs: PromptRuntimeInputs,
+  currentStep: ResolvedFlowStepV14 | null,
+  runtimeState: FlowRuntimeState,
+  existingArtifacts: SavedArtifact[],
+  manualFileName?: string,
+  manualPhase?: string,
+  manualTargetRole?: string
+): ArtifactAnalysisResult
 function loadSavedArtifacts(): SavedArtifact[]
 function saveSavedArtifacts(artifacts: SavedArtifact[]): void
 function artifactTypeToDefaultInputKey(type: ArtifactType): RuntimeInputKey | null
-function applyArtifactToRuntimeOutputsText(...)
+function applyArtifactToRuntimeOutputsText(
+  runtimeOutputsText: string,
+  artifact: SavedArtifact,
+  inputKey: RuntimeInputKey
+): { ok: true; text: string } | { ok: false; error: string }
 ```
 
 ### 10.3 State
@@ -414,13 +503,15 @@ Action例:
 11. 保存済みArtifactをnext_step Prompt生成用Inputとして `runtimeOutputsText` に反映できる。
 12. PMDecisionにPhase付き命名規則を適用できる。
 13. PMDecision_ReworkにTargetRole付き命名規則を適用できる。
-14. `[Unit]_Decision.md` など汎用Decision名を保存ブロックできる。
-15. 同一論理フォルダ内の同名衝突時、上書きせず警告できる。
-16. 同名衝突時、既存Revを見て `_RevN` 候補を提示できる。
-17. `WorkerApproval / Conditional / Hold` を保存可能Phaseとして扱える。
-18. U-FLOW-11 Prompt Runtimeの生成・コピー・Stage動作が維持される。
-19. `main-05` Integrator-S PM-approved Spec guardが維持される。
-20. `main-06` Worker external handoffがAPI送信されない制約が維持される。
+14. ReworkInstructionにTargetRole + timestamp付き命名規則を適用できる。
+15. `[Unit]_Decision.md` など汎用Decision名を保存ブロックできる。
+16. 同一論理フォルダ内の同名衝突時、上書きせず警告できる。
+17. 同名衝突時、既存Revを見て `_RevN` 候補を提示できる。
+18. `WorkerApproval / Conditional / Hold` を保存可能Phaseとして扱える。
+19. Report判定が `*Report_*` / `*Result_*` に限定される。
+20. U-FLOW-11 Prompt Runtimeの生成・コピー・Stage動作が維持される。
+21. `main-05` Integrator-S PM-approved Spec guardが維持される。
+22. `main-06` Worker external handoffがAPI送信されない制約が維持される。
 
 ## 12. Verification
 
@@ -433,6 +524,9 @@ Workerは最低限以下を実施する。
   - `U-FLOW-12_PMDecision_SpecApproval.md` がDecision / `units/U-FLOW-12/decisions/` と判定される。
   - 同名保存2回目で `_Rev2` が提案される。
   - `U-FLOW-12_PMDecision_Rework_Worker.md` がPMDecision_Rework / `decisions/` と判定される。
+  - `U-FLOW-12_ReworkInstruction_Worker_20260506_120000.md` がReworkInstruction / `rework/` と判定される。
+  - `U-FLOW-12_DebugReport_20260506_120000.md` がReport / `reports/` と判定される。
+  - `ErrorReport.md` や `TestResults.json` がReportとして誤判定されない。
   - 保存済みPacketを `packet_content` に反映後、Worker stepのPrompt生成で利用できる。
   - 既存U-FLOW-11 Prompt Runtimeで `Generate Prompt`, `Copy Prompt`, `Stage to Role Columns` が従来通り動く。
 
