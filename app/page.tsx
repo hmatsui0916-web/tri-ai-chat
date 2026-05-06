@@ -216,7 +216,66 @@ type PromptRuntimeInputs = {
   target?: string;
 };
 
-type RuntimeInputKey = keyof PromptRuntimeInputs;
+type RuntimeInputKey =
+  | "unit_id"
+  | "human_goal"
+  | "pm_decision"
+  | "review_report"
+  | "spec_content"
+  | "packet_content"
+  | "worker_code"
+  | "debug_report"
+  | "infra_result"
+  | "human_execution_result"
+  | "control_decision"
+  | "rework_instruction"
+  | "infra_test_plan"
+  | "pm_approval_request"
+  | "function_name"
+  | "target";
+
+type ArtifactType =
+  | "Decision"
+  | "Spec"
+  | "Packet"
+  | "Report"
+  | "PMDecision_Rework"
+  | "ReworkInstruction"
+  | "Code"
+  | "Unknown";
+
+type SavedArtifact = {
+  id: string;
+  unitId: string;
+  fileName: string;
+  artifactType: ArtifactType;
+  logicalPath: string;
+  role?: RoleName | string;
+  currentStepId?: string;
+  currentStepName?: string;
+  state: string;
+  routeContext: string;
+  timestamp: string;
+  content: string;
+  rev?: number;
+};
+
+type ArtifactAnalysisResult = {
+  content: string;
+  extractedFileName: string | null;
+  candidateFileName: string;
+  finalFileName: string;
+  detectedUnitId: string;
+  artifactType: ArtifactType;
+  logicalPath: string;
+  pmDecisionPhase: string | null;
+  targetRole: string | null;
+  rev: number | null;
+  suggestedRevisionFileName: string | null;
+  canSave: boolean;
+  errors: string[];
+  warnings: string[];
+};
 
 type RoleTemplateDefinition = {
   scope: string;
@@ -346,6 +405,20 @@ const DEFAULT_PAGE_SIZE = 4;
 const MAX_COLUMNS = 10;
 const MIN_COLUMNS = 1;
 const APP_VERSION = "v0.17.0-flow-ui";
+const ARTIFACT_STORAGE_KEY = "tri-ai-saved-artifacts";
+const PM_DECISION_PHASES = [
+  "Start",
+  "SpecApproval",
+  "PacketApproval",
+  "WorkerApproval",
+  "ControlApproval",
+  "Final",
+  "Conditional",
+  "Hold",
+  "Rework",
+] as const;
+const REWORK_TARGET_ROLES = ["Designer", "IntegratorS", "Worker", "Infra"] as const;
+const REWORK_INSTRUCTION_TARGET_ROLES = ["Worker", "Designer", "Infra"] as const;
 
 const providerLabels: Record<Provider, string> = {
   openai: "OpenAI",
@@ -1291,6 +1364,310 @@ function parsePromptRuntimeInputs(text: string): {
   }
 }
 
+function extractFileNameFromOutput(content: string): string | null {
+  const lines = content.split(/\r?\n/);
+  const scanLimit = Math.min(lines.length, 12);
+  for (let index = 0; index < scanLimit; index += 1) {
+    const line = lines[index];
+    const inline = line.match(/^\s*File\s*:\s*(.+?)\s*$/i);
+    if (inline?.[1]?.trim()) {
+      return sanitizeArtifactFileName(inline[1].trim());
+    }
+    if (/^\s*File\s*:\s*$/i.test(line)) {
+      const next = lines[index + 1]?.trim();
+      if (next) return sanitizeArtifactFileName(next);
+    }
+  }
+  return null;
+}
+
+function sanitizeArtifactFileName(fileName: string): string {
+  const leaf = fileName.trim().split(/[\\/]+/).filter(Boolean).pop() ?? "";
+  return leaf.replace(/[<>:"|?*\u0000-\u001F]/g, "_").replace(/^\.+/, "").trim();
+}
+
+function detectUnitId(fileName: string | null, inputs: PromptRuntimeInputs): string {
+  const inputUnit = inputs.unit_id?.trim();
+  const fileUnit = fileName?.match(/(U-FLOW-\d+)/i)?.[1];
+  if (inputUnit && (inputUnit !== DEFAULT_PROMPT_RUNTIME_INPUTS.unit_id || !fileUnit)) return inputUnit;
+  if (fileUnit) return fileUnit.toUpperCase();
+  if (inputUnit) return inputUnit;
+  return DEFAULT_PROMPT_RUNTIME_INPUTS.unit_id ?? "U-FLOW-11";
+}
+
+function detectArtifactType(fileName: string): ArtifactType {
+  if (/_PMDecision_Rework_/i.test(fileName)) return "PMDecision_Rework";
+  if (/_PMDecision_/i.test(fileName)) return "Decision";
+  if (/_Spec\.md$/i.test(fileName)) return "Spec";
+  if (/_Packet\.md$/i.test(fileName)) return "Packet";
+  if (/_ReworkInstruction_/i.test(fileName)) return "ReworkInstruction";
+  if (/(Report|Result)_/i.test(fileName)) return "Report";
+  if (/_Code\.[^.]+$/i.test(fileName)) return "Code";
+  return "Unknown";
+}
+
+function getLogicalFolder(unitId: string, artifactType: ArtifactType): string {
+  const root = `units/${unitId}`;
+  if (artifactType === "Decision" || artifactType === "PMDecision_Rework") return `${root}/decisions/`;
+  if (artifactType === "Spec") return `${root}/specs/`;
+  if (artifactType === "Packet") return `${root}/packets/`;
+  if (artifactType === "ReworkInstruction") return `${root}/rework/`;
+  if (artifactType === "Report") return `${root}/reports/`;
+  return `${root}/outputs/`;
+}
+
+function normalizeTargetRoleForFileName(role: string): string {
+  const value = role.trim().replace(/[^A-Za-z-]/g, "");
+  if (/^Integrator-S$/i.test(value) || /^IntegratorS$/i.test(value)) return "IntegratorS";
+  if (/^Designer$/i.test(value)) return "Designer";
+  if (/^Worker$/i.test(value)) return "Worker";
+  if (/^Infra$/i.test(value)) return "Infra";
+  return value;
+}
+
+function normalizeTimestampForFileName(timestamp: string): string {
+  return timestamp.replace(/[-:TZ.]/g, "").slice(0, 15).replace(/^(\d{8})(\d{6}).*/, "$1_$2");
+}
+
+function inferPmDecisionPhase(step: ResolvedFlowStepV14 | null, fileName: string): string | null {
+  const filePhase = fileName.match(/_PMDecision_([^_.]+)(?:_|\.md$)/i)?.[1];
+  const matchedPhase = PM_DECISION_PHASES.find((phase) => phase.toLowerCase() === filePhase?.toLowerCase());
+  if (matchedPhase) return matchedPhase;
+
+  if (!step) return null;
+  if (step.id === "main-01") return "Start";
+  if (step.id === "main-04") return "SpecApproval";
+  if (step.id === "main-05") return "PacketApproval";
+  if (step.id === "main-09") return "ControlApproval";
+  if (step.id === "main-10") return "Final";
+  if (step.route_context?.includes("feedback") || step.id.startsWith("fb-")) return "Rework";
+  return null;
+}
+
+function buildCandidateArtifactFileName(
+  artifactType: ArtifactType,
+  unitId: string,
+  step: ResolvedFlowStepV14 | null,
+  phase: string | null,
+  targetRole: string | null,
+  timestamp: string
+): string {
+  const safeUnit = sanitizeArtifactFileName(unitId) || "U-FLOW";
+  if (artifactType === "Decision") return `${safeUnit}_PMDecision_${phase ?? inferPmDecisionPhase(step, "") ?? "Start"}.md`;
+  if (artifactType === "PMDecision_Rework") return `${safeUnit}_PMDecision_Rework_${targetRole ?? "Worker"}.md`;
+  if (artifactType === "Spec") return `${safeUnit}_Spec.md`;
+  if (artifactType === "Packet") return `${safeUnit}_Packet.md`;
+  if (artifactType === "ReworkInstruction") {
+    return buildReworkInstructionCandidateFileName(
+      safeUnit,
+      (targetRole && REWORK_INSTRUCTION_TARGET_ROLES.includes(targetRole as typeof REWORK_INSTRUCTION_TARGET_ROLES[number])
+        ? targetRole
+        : "Worker") as typeof REWORK_INSTRUCTION_TARGET_ROLES[number],
+      timestamp
+    );
+  }
+  if (artifactType === "Report") return `${safeUnit}_ReviewReport_${normalizeTimestampForFileName(timestamp)}.md`;
+  if (artifactType === "Code") return `${safeUnit}_Code.txt`;
+  return `${safeUnit}_Artifact_${normalizeTimestampForFileName(timestamp)}.md`;
+}
+
+function buildReworkInstructionCandidateFileName(
+  unitId: string,
+  targetRole: "Worker" | "Designer" | "Infra",
+  timestamp: string
+): string {
+  return `${sanitizeArtifactFileName(unitId)}_ReworkInstruction_${targetRole}_${normalizeTimestampForFileName(timestamp)}.md`;
+}
+
+function parseRevision(fileName: string): number | null {
+  const match = fileName.match(/_Rev(\d+)(?=\.[^.]+$|$)/i);
+  return match ? Number(match[1]) : null;
+}
+
+function addRevisionToFileName(fileName: string, rev: number): string {
+  const withoutRev = fileName.replace(/_Rev\d+(?=\.[^.]+$|$)/i, "");
+  const dot = withoutRev.lastIndexOf(".");
+  if (dot <= 0) return `${withoutRev}_Rev${rev}`;
+  return `${withoutRev.slice(0, dot)}_Rev${rev}${withoutRev.slice(dot)}`;
+}
+
+function suggestRevisionFileName(fileName: string, existing: SavedArtifact[], logicalPath: string): string {
+  const baseWithoutRev = fileName.replace(/_Rev\d+(?=\.[^.]+$|$)/i, "");
+  const revisions = existing
+    .filter((artifact) => artifact.logicalPath === logicalPath)
+    .filter((artifact) => artifact.fileName === fileName || artifact.fileName.replace(/_Rev\d+(?=\.[^.]+$|$)/i, "") === baseWithoutRev)
+    .map((artifact) => parseRevision(artifact.fileName) ?? 1);
+  const nextRev = revisions.length ? Math.max(...revisions) + 1 : 2;
+  return addRevisionToFileName(fileName, Math.max(2, nextRev));
+}
+
+function analyzeArtifactOutput(
+  content: string,
+  inputs: PromptRuntimeInputs,
+  currentStep: ResolvedFlowStepV14 | null,
+  runtimeState: FlowRuntimeState,
+  existingArtifacts: SavedArtifact[],
+  manualFileName?: string,
+  manualPhase?: string,
+  manualTargetRole?: string
+): ArtifactAnalysisResult {
+  const timestamp = new Date().toISOString();
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  const extractedFileName = extractFileNameFromOutput(content);
+  const manualName = manualFileName ? sanitizeArtifactFileName(manualFileName) : "";
+  const initialFileName = manualName || extractedFileName;
+  const detectedUnitId = detectUnitId(initialFileName, inputs);
+  const fileUnit = initialFileName?.match(/(U-FLOW-\d+)/i)?.[1]?.toUpperCase() ?? null;
+  if (
+    fileUnit &&
+    inputs.unit_id?.trim() &&
+    inputs.unit_id.trim() !== DEFAULT_PROMPT_RUNTIME_INPUTS.unit_id &&
+    fileUnit !== inputs.unit_id.trim().toUpperCase()
+  ) {
+    warnings.push(`Unit ID mismatch: runtime ${inputs.unit_id.trim()} / file ${fileUnit}.`);
+  }
+
+  let artifactType = initialFileName ? detectArtifactType(initialFileName) : "Unknown";
+  const selectedTargetRole = manualTargetRole ? normalizeTargetRoleForFileName(manualTargetRole) : null;
+  const selectedPhase = manualPhase || null;
+  let pmDecisionPhase = artifactType === "Decision" ? selectedPhase || inferPmDecisionPhase(currentStep, initialFileName ?? "") : null;
+  let targetRole = selectedTargetRole;
+
+  if (artifactType === "PMDecision_Rework") {
+    const fileTarget = initialFileName?.match(/_PMDecision_Rework_([^_.]+)/i)?.[1] ?? null;
+    targetRole = selectedTargetRole || (fileTarget ? normalizeTargetRoleForFileName(fileTarget) : null);
+    pmDecisionPhase = "Rework";
+  }
+
+  if (artifactType === "ReworkInstruction") {
+    const fileTarget = initialFileName?.match(/_ReworkInstruction_([^_.]+)/i)?.[1] ?? null;
+    targetRole = selectedTargetRole || (fileTarget ? normalizeTargetRoleForFileName(fileTarget) : null);
+  }
+
+  if (!initialFileName && selectedPhase) artifactType = "Decision";
+  if (!initialFileName && selectedTargetRole && runtimeState.routeContext.includes("feedback")) artifactType = "ReworkInstruction";
+
+  const candidateFileName = buildCandidateArtifactFileName(
+    artifactType,
+    detectedUnitId,
+    currentStep,
+    pmDecisionPhase,
+    targetRole,
+    timestamp
+  );
+  const finalFileName = initialFileName || candidateFileName;
+  const logicalPath = getLogicalFolder(detectedUnitId, artifactType);
+
+  if (!content.trim()) errors.push("Role Output is empty.");
+  if (!extractedFileName && !manualName) {
+    errors.push("File: line is missing. Confirm or enter a file name before saving.");
+  }
+  if (!finalFileName) errors.push("File name is empty after sanitization.");
+  if (artifactType === "Decision" && !pmDecisionPhase) {
+    errors.push("PMDecision requires a phase.");
+  }
+  if (artifactType === "Decision" && /_PMDecision_?\.md$/i.test(finalFileName)) {
+    errors.push("Phase-less PMDecision file names are blocked.");
+  }
+  if (artifactType === "PMDecision_Rework") {
+    if (!targetRole || !REWORK_TARGET_ROLES.includes(targetRole as typeof REWORK_TARGET_ROLES[number])) {
+      errors.push("PMDecision_Rework requires TargetRole: Designer, IntegratorS, Worker, or Infra.");
+    }
+  }
+  if (artifactType === "ReworkInstruction") {
+    if (!targetRole || !REWORK_INSTRUCTION_TARGET_ROLES.includes(targetRole as typeof REWORK_INSTRUCTION_TARGET_ROLES[number])) {
+      errors.push("ReworkInstruction requires TargetRole: Worker, Designer, or Infra.");
+    }
+    if (!/_ReworkInstruction_[^_.]+_\d{8}_\d{6}\.md$/i.test(finalFileName)) {
+      warnings.push(`Recommended ReworkInstruction name: ${candidateFileName}.`);
+    }
+  }
+
+  const duplicate = existingArtifacts.some((artifact) => artifact.logicalPath === logicalPath && artifact.fileName === finalFileName);
+  const suggestedRevisionFileName = duplicate ? suggestRevisionFileName(finalFileName, existingArtifacts, logicalPath) : null;
+  if (duplicate) {
+    errors.push(`Same file already exists in ${logicalPath}. Use suggested revision: ${suggestedRevisionFileName}.`);
+  }
+
+  return {
+    content,
+    extractedFileName,
+    candidateFileName,
+    finalFileName,
+    detectedUnitId,
+    artifactType,
+    logicalPath,
+    pmDecisionPhase,
+    targetRole,
+    rev: parseRevision(finalFileName),
+    suggestedRevisionFileName,
+    canSave: errors.length === 0,
+    errors,
+    warnings,
+  };
+}
+
+function isSavedArtifact(value: unknown): value is SavedArtifact {
+  if (!isPlainObject(value)) return false;
+  return (
+    typeof value.id === "string" &&
+    typeof value.unitId === "string" &&
+    typeof value.fileName === "string" &&
+    typeof value.artifactType === "string" &&
+    typeof value.logicalPath === "string" &&
+    typeof value.state === "string" &&
+    typeof value.routeContext === "string" &&
+    typeof value.timestamp === "string" &&
+    typeof value.content === "string"
+  );
+}
+
+function loadSavedArtifacts(): SavedArtifact[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const stored = window.localStorage.getItem(ARTIFACT_STORAGE_KEY);
+    if (!stored) return [];
+    const parsed = JSON.parse(stored);
+    return Array.isArray(parsed) ? parsed.filter(isSavedArtifact) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveSavedArtifacts(artifacts: SavedArtifact[]): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(ARTIFACT_STORAGE_KEY, JSON.stringify(artifacts.filter(isSavedArtifact), null, 2));
+}
+
+function artifactTypeToDefaultInputKey(type: ArtifactType): RuntimeInputKey | null {
+  if (type === "Decision" || type === "PMDecision_Rework") return "pm_decision";
+  if (type === "Spec") return "spec_content";
+  if (type === "Packet") return "packet_content";
+  if (type === "ReworkInstruction") return "rework_instruction";
+  if (type === "Code") return "worker_code";
+  if (type === "Report") return "review_report";
+  return null;
+}
+
+function applyArtifactToRuntimeOutputsText(
+  runtimeOutputsText: string,
+  artifact: SavedArtifact,
+  inputKey: RuntimeInputKey
+): { ok: true; text: string } | { ok: false; error: string } {
+  try {
+    const parsed = JSON.parse(runtimeOutputsText);
+    if (!isPlainObject(parsed)) return { ok: false, error: "Runtime outputs must be a JSON object." };
+    const next = { ...DEFAULT_PROMPT_RUNTIME_INPUTS, ...parsed, [inputKey]: artifact.content };
+    return { ok: true, text: JSON.stringify(next, null, 2) };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "Invalid runtime outputs JSON.",
+    };
+  }
+}
+
 function cleanPromptVariables(variables: PromptRuntimeInputs): PromptRuntimeInputs {
   return Object.fromEntries(
     Object.entries(variables).filter(([, value]) => typeof value === "string" && value.trim().length > 0)
@@ -1656,6 +2033,15 @@ export default function Home() {
     maxIterationsReached: false,
   });
   const [runtimeOutputsText, setRuntimeOutputsText] = useState(JSON.stringify(DEFAULT_PROMPT_RUNTIME_INPUTS, null, 2));
+  const [artifactOutputText, setArtifactOutputText] = useState("");
+  const [artifactManualFileName, setArtifactManualFileName] = useState("");
+  const [artifactManualPhase, setArtifactManualPhase] = useState("");
+  const [artifactManualTargetRole, setArtifactManualTargetRole] = useState("");
+  const [savedArtifacts, setSavedArtifacts] = useState<SavedArtifact[]>([]);
+  const [artifactTypeFilter, setArtifactTypeFilter] = useState<ArtifactType | "All">("All");
+  const [artifactUnitFilter, setArtifactUnitFilter] = useState("");
+  const [artifactInputTargetKey, setArtifactInputTargetKey] = useState<RuntimeInputKey>("packet_content");
+  const [artifactSaveMessage, setArtifactSaveMessage] = useState("");
   const [pmApprovedSpec, setPmApprovedSpec] = useState(false);
   const [promptGenerationResult, setPromptGenerationResult] = useState<PromptGenerationResult | null>(null);
   const [stagedPromptsByColumn, setStagedPromptsByColumn] = useState<Partial<Record<ColumnId, StagedColumnPrompt[]>>>({});
@@ -1680,6 +2066,10 @@ export default function Home() {
   const totalTurns = columns.length
     ? Math.max(...columns.map((column) => (columnHistories[column.id] ?? []).length))
     : 0;
+
+  useEffect(() => {
+    setSavedArtifacts(loadSavedArtifacts());
+  }, []);
 
   const statusText = useMemo(() => {
     if (loading) return "回答取得中...";
@@ -1743,6 +2133,43 @@ export default function Home() {
     }
     return findRuntimeCurrentStep(selectedFlow, flowRuntimeState, completedStepIds);
   }, [selectedFlow, currentStepId, flowRuntimeState, completedStepIds]);
+
+  const parsedArtifactRuntimeInputs = useMemo(() => {
+    const parsed = parsePromptRuntimeInputs(runtimeOutputsText);
+    return parsed.ok ? parsed.value : DEFAULT_PROMPT_RUNTIME_INPUTS;
+  }, [runtimeOutputsText]);
+
+  const artifactAnalysis = useMemo(
+    () =>
+      analyzeArtifactOutput(
+        artifactOutputText,
+        parsedArtifactRuntimeInputs,
+        currentStep,
+        flowRuntimeState,
+        savedArtifacts,
+        artifactManualFileName,
+        artifactManualPhase,
+        artifactManualTargetRole
+      ),
+    [
+      artifactOutputText,
+      parsedArtifactRuntimeInputs,
+      currentStep,
+      flowRuntimeState,
+      savedArtifacts,
+      artifactManualFileName,
+      artifactManualPhase,
+      artifactManualTargetRole,
+    ]
+  );
+
+  const filteredSavedArtifacts = useMemo(() => {
+    return savedArtifacts
+      .filter((artifact) => artifactTypeFilter === "All" || artifact.artifactType === artifactTypeFilter)
+      .filter((artifact) => !artifactUnitFilter.trim() || artifact.unitId.toLowerCase().includes(artifactUnitFilter.trim().toLowerCase()))
+      .slice()
+      .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+  }, [savedArtifacts, artifactTypeFilter, artifactUnitFilter]);
 
   const flowRuntimeNextSteps = useMemo(() => {
     if (!isFlowV14(selectedFlow)) return [] as ResolvedFlowStepV14[];
@@ -2291,6 +2718,76 @@ export default function Home() {
     }
     setCopyStatus(roleColumnIds.length ? `Staged for ${roleColumnIds.join(", ")}` : "Staged prompt; external handoff/manual target");
     window.setTimeout(() => setCopyStatus(""), 1800);
+  };
+
+  const saveCurrentArtifact = () => {
+    const analysis = artifactAnalysis;
+    if (!analysis.canSave) {
+      setArtifactSaveMessage("Artifact save blocked. Fix errors first.");
+      window.setTimeout(() => setArtifactSaveMessage(""), 2200);
+      return;
+    }
+
+    const targetRoles = currentStep && isFlowV14(selectedFlow)
+      ? resolveTargetRoles(currentStep, selectedFlow, selectedDecision)
+      : [];
+    const artifact: SavedArtifact = {
+      id: crypto.randomUUID(),
+      unitId: analysis.detectedUnitId,
+      fileName: analysis.finalFileName,
+      artifactType: analysis.artifactType,
+      logicalPath: analysis.logicalPath,
+      role: targetRoles.join(", ") || formatFlowEndpoint(currentStep?.to) || undefined,
+      currentStepId: currentStep?.id,
+      currentStepName: currentStep ? getStepDisplayName(currentStep) : undefined,
+      state: flowRuntimeState.state,
+      routeContext: flowRuntimeState.routeContext,
+      timestamp: new Date().toISOString(),
+      content: analysis.content,
+      rev: analysis.rev ?? undefined,
+    };
+    const nextArtifacts = [...savedArtifacts, artifact];
+    saveSavedArtifacts(nextArtifacts);
+    setSavedArtifacts(nextArtifacts);
+    setArtifactSaveMessage(`Saved ${artifact.fileName}`);
+    setRuntimeActionLogs((current) =>
+      addActionLog(
+        current,
+        "Artifact Saved",
+        flowRuntimeState.state,
+        flowRuntimeState.routeContext,
+        flowRuntimeState.state,
+        flowRuntimeState.routeContext,
+        currentStep?.id,
+        `${artifact.fileName}; ${artifact.logicalPath}; ${artifact.artifactType}`
+      )
+    );
+    window.setTimeout(() => setArtifactSaveMessage(""), 2200);
+  };
+
+  const applySavedArtifactToRuntimeInput = (artifact: SavedArtifact, inputKey: RuntimeInputKey) => {
+    const result = applyArtifactToRuntimeOutputsText(runtimeOutputsText, artifact, inputKey);
+    if (!result.ok) {
+      setArtifactSaveMessage(`Runtime input update blocked: ${result.error}`);
+      window.setTimeout(() => setArtifactSaveMessage(""), 2600);
+      return;
+    }
+
+    setRuntimeOutputsText(result.text);
+    setArtifactSaveMessage(`Applied ${artifact.fileName} -> ${inputKey}`);
+    setRuntimeActionLogs((current) =>
+      addActionLog(
+        current,
+        "Artifact Applied to Runtime Input",
+        flowRuntimeState.state,
+        flowRuntimeState.routeContext,
+        flowRuntimeState.state,
+        flowRuntimeState.routeContext,
+        currentStep?.id,
+        `${artifact.fileName} -> ${inputKey}`
+      )
+    );
+    window.setTimeout(() => setArtifactSaveMessage(""), 2200);
   };
 
   useEffect(() => {
@@ -3644,6 +4141,214 @@ export default function Home() {
                       ))}
                     </div>
                   )}
+                </div>
+              </div>
+
+              {/* U-FLOW-12 Artifact Save Runtime */}
+              <div style={{ marginBottom: "16px", padding: "12px", backgroundColor: "#fff", borderRadius: "4px", border: "1px solid #cce5ff" }}>
+                <div style={{ fontSize: "0.95em", fontWeight: "bold", marginBottom: "8px" }}>U-FLOW-12 Artifact Save Runtime</div>
+                <div style={{ display: "grid", gap: "10px" }}>
+                  <label style={{ display: "grid", gap: "4px", fontSize: "0.85em" }}>
+                    Role Output
+                    <textarea
+                      value={artifactOutputText}
+                      onChange={(e) => setArtifactOutputText(e.target.value)}
+                      placeholder="Paste role output. Prefer a leading File: line."
+                      spellCheck={false}
+                      style={{
+                        width: "100%",
+                        minHeight: "130px",
+                        resize: "vertical",
+                        padding: "8px",
+                        border: "1px solid #d1d5db",
+                        borderRadius: "8px",
+                        fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                        fontSize: "12px",
+                        lineHeight: 1.45,
+                      }}
+                    />
+                  </label>
+
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "8px" }}>
+                    <label style={{ display: "grid", gap: "4px", fontSize: "0.8em" }}>
+                      Manual file name
+                      <input
+                        value={artifactManualFileName}
+                        onChange={(e) => setArtifactManualFileName(e.target.value)}
+                        placeholder={artifactAnalysis.candidateFileName}
+                        style={{ padding: "6px", border: "1px solid #d1d5db", borderRadius: "4px" }}
+                      />
+                    </label>
+                    <label style={{ display: "grid", gap: "4px", fontSize: "0.8em" }}>
+                      PMDecision phase
+                      <select
+                        value={artifactManualPhase}
+                        onChange={(e) => setArtifactManualPhase(e.target.value)}
+                        style={{ padding: "6px", border: "1px solid #d1d5db", borderRadius: "4px" }}
+                      >
+                        <option value="">auto / none</option>
+                        {PM_DECISION_PHASES.map((phase) => (
+                          <option value={phase} key={phase}>{phase}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label style={{ display: "grid", gap: "4px", fontSize: "0.8em" }}>
+                      Rework target role
+                      <select
+                        value={artifactManualTargetRole}
+                        onChange={(e) => setArtifactManualTargetRole(e.target.value)}
+                        style={{ padding: "6px", border: "1px solid #d1d5db", borderRadius: "4px" }}
+                      >
+                        <option value="">auto / none</option>
+                        {Array.from(new Set([...REWORK_TARGET_ROLES, ...REWORK_INSTRUCTION_TARGET_ROLES])).map((role) => (
+                          <option value={role} key={role}>{role}</option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+
+                  <div style={{ padding: "10px", backgroundColor: "#f8f9fa", border: "1px solid #e5e7eb", borderRadius: "6px", fontSize: "0.8em", lineHeight: 1.6 }}>
+                    <div><strong>Extracted File:</strong> {artifactAnalysis.extractedFileName || "(missing)"}</div>
+                    <div><strong>Final File:</strong> {artifactAnalysis.finalFileName || "(none)"}</div>
+                    <div><strong>Suggested Candidate:</strong> {artifactAnalysis.candidateFileName}</div>
+                    <div><strong>Unit ID:</strong> {artifactAnalysis.detectedUnitId}</div>
+                    <div><strong>Artifact Type:</strong> {artifactAnalysis.artifactType}</div>
+                    <div><strong>Logical Path:</strong> {artifactAnalysis.logicalPath}</div>
+                    <div><strong>Flow Context:</strong> {currentStep?.id || "(none)"} / {flowRuntimeState.state} / {flowRuntimeState.routeContext}</div>
+                    <div><strong>PMDecision Phase:</strong> {artifactAnalysis.pmDecisionPhase || "(none)"}</div>
+                    <div><strong>Target Role:</strong> {artifactAnalysis.targetRole || "(none)"}</div>
+                    <div><strong>Rev:</strong> {artifactAnalysis.rev ?? "(none)"}</div>
+                    {artifactAnalysis.suggestedRevisionFileName && (
+                      <div style={{ color: "#9c5a00" }}><strong>Revision Suggestion:</strong> {artifactAnalysis.suggestedRevisionFileName}</div>
+                    )}
+                  </div>
+
+                  {!!artifactAnalysis.errors.length && (
+                    <div style={{ padding: "8px", border: "1px solid #ffc9c9", borderRadius: "4px", backgroundColor: "#fff5f5", color: "#b91c1c", fontSize: "0.8em", whiteSpace: "pre-wrap" }}>
+                      {artifactAnalysis.errors.join("\n")}
+                    </div>
+                  )}
+                  {!!artifactAnalysis.warnings.length && (
+                    <div style={{ padding: "8px", border: "1px solid #ffd8a8", borderRadius: "4px", backgroundColor: "#fff9db", color: "#7c4a00", fontSize: "0.8em", whiteSpace: "pre-wrap" }}>
+                      {artifactAnalysis.warnings.join("\n")}
+                    </div>
+                  )}
+
+                  <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" }}>
+                    <button
+                      type="button"
+                      onClick={saveCurrentArtifact}
+                      disabled={!artifactAnalysis.canSave}
+                      style={{
+                        padding: "6px 12px",
+                        fontSize: "0.85em",
+                        backgroundColor: artifactAnalysis.canSave ? "#51cf66" : "#e9ecef",
+                        color: artifactAnalysis.canSave ? "#fff" : "#666",
+                        border: "none",
+                        borderRadius: "4px",
+                        cursor: artifactAnalysis.canSave ? "pointer" : "not-allowed",
+                      }}
+                    >
+                      Artifact Save
+                    </button>
+                    {artifactAnalysis.suggestedRevisionFileName && (
+                      <button
+                        type="button"
+                        onClick={() => setArtifactManualFileName(artifactAnalysis.suggestedRevisionFileName ?? "")}
+                        style={{ padding: "6px 12px", fontSize: "0.85em", backgroundColor: "#fff4e6", color: "#9c5a00", border: "1px solid #ffd8a8", borderRadius: "4px", cursor: "pointer" }}
+                      >
+                        Use Suggested Rev
+                      </button>
+                    )}
+                    {artifactSaveMessage && <span style={{ fontSize: "0.8em", color: "#495057" }}>{artifactSaveMessage}</span>}
+                  </div>
+
+                  <div style={{ display: "grid", gap: "8px", borderTop: "1px solid #e5e7eb", paddingTop: "10px" }}>
+                    <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "end" }}>
+                      <label style={{ display: "grid", gap: "4px", fontSize: "0.8em" }}>
+                        Unit filter
+                        <input
+                          value={artifactUnitFilter}
+                          onChange={(e) => setArtifactUnitFilter(e.target.value)}
+                          placeholder="U-FLOW-12"
+                          style={{ padding: "6px", border: "1px solid #d1d5db", borderRadius: "4px" }}
+                        />
+                      </label>
+                      <label style={{ display: "grid", gap: "4px", fontSize: "0.8em" }}>
+                        Type filter
+                        <select
+                          value={artifactTypeFilter}
+                          onChange={(e) => setArtifactTypeFilter(e.target.value as ArtifactType | "All")}
+                          style={{ padding: "6px", border: "1px solid #d1d5db", borderRadius: "4px" }}
+                        >
+                          <option value="All">All</option>
+                          {(["Decision", "Spec", "Packet", "Report", "PMDecision_Rework", "ReworkInstruction", "Code", "Unknown"] as ArtifactType[]).map((type) => (
+                            <option value={type} key={type}>{type}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <label style={{ display: "grid", gap: "4px", fontSize: "0.8em" }}>
+                        Runtime input key
+                        <select
+                          value={artifactInputTargetKey}
+                          onChange={(e) => setArtifactInputTargetKey(e.target.value as RuntimeInputKey)}
+                          style={{ padding: "6px", border: "1px solid #d1d5db", borderRadius: "4px" }}
+                        >
+                          {(Object.keys(DEFAULT_PROMPT_RUNTIME_INPUTS) as RuntimeInputKey[]).map((key) => (
+                            <option value={key} key={key}>{key}</option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
+
+                    <div style={{ fontSize: "0.8em", color: "#495057" }}>
+                      Saved Artifacts: {savedArtifacts.length} / Showing: {filteredSavedArtifacts.length}
+                    </div>
+                    <div style={{ display: "grid", gap: "8px", maxHeight: "320px", overflow: "auto" }}>
+                      {filteredSavedArtifacts.length === 0 && (
+                        <div style={{ fontSize: "0.8em", color: "#666" }}>(no saved artifacts)</div>
+                      )}
+                      {filteredSavedArtifacts.map((artifact) => {
+                        const defaultKey = artifactTypeToDefaultInputKey(artifact.artifactType);
+                        return (
+                          <div key={artifact.id} style={{ padding: "8px", backgroundColor: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: "6px", display: "grid", gap: "6px" }}>
+                            <div style={{ fontSize: "0.82em", fontWeight: 700 }}>{artifact.fileName}</div>
+                            <div style={{ fontSize: "0.75em", color: "#555", lineHeight: 1.5 }}>
+                              {artifact.artifactType} / {artifact.logicalPath} / role {artifact.role || "(none)"} / step {artifact.currentStepId || "(none)"} / {artifact.state}/{artifact.routeContext} / {new Date(artifact.timestamp).toLocaleString("ja-JP")} / rev {artifact.rev ?? "(none)"}
+                            </div>
+                            <pre style={{ margin: 0, padding: "6px", maxHeight: "70px", overflow: "auto", whiteSpace: "pre-wrap", backgroundColor: "#fff", border: "1px solid #e5e7eb", borderRadius: "4px", fontSize: "11px" }}>
+                              {artifact.content.slice(0, 1000)}
+                            </pre>
+                            <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                              <button
+                                type="button"
+                                onClick={() => void navigator.clipboard.writeText(artifact.content)}
+                                style={{ padding: "4px 8px", fontSize: "0.75em", backgroundColor: "#495057", color: "#fff", border: "none", borderRadius: "4px", cursor: "pointer" }}
+                              >
+                                Copy content
+                              </button>
+                              {defaultKey && (
+                                <button
+                                  type="button"
+                                  onClick={() => applySavedArtifactToRuntimeInput(artifact, defaultKey)}
+                                  style={{ padding: "4px 8px", fontSize: "0.75em", backgroundColor: "#228be6", color: "#fff", border: "none", borderRadius: "4px", cursor: "pointer" }}
+                                >
+                                  Use default: {defaultKey}
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => applySavedArtifactToRuntimeInput(artifact, artifactInputTargetKey)}
+                                style={{ padding: "4px 8px", fontSize: "0.75em", backgroundColor: "#12b886", color: "#fff", border: "none", borderRadius: "4px", cursor: "pointer" }}
+                              >
+                                Use as Input: {artifactInputTargetKey}
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
                 </div>
               </div>
 
