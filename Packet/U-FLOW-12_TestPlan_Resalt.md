@@ -7,12 +7,14 @@ Scope: Artifact Save Runtime Human Execution Follow
 
 U-FLOW-12 Artifact Save Runtime の実機テストを Human 実施で確認した。
 
-Final Judgment: FAIL
+Initial Judgment: FAIL
+Retest Judgment: PASS
 
 理由:
 
-- TC-11 で Rev 付き Packet Artifact が `Packet / units/U-FLOW-12/packets/` ではなく `Unknown / units/U-FLOW-12/outputs/` として保存された。
-- Rev 衝突回避後の Artifact Type 判定と logicalPath が崩れるため、U-FLOW-12 の主要要件に対する Critical 不具合として扱う。
+- 初回実施では TC-11 で Rev 付き Packet Artifact が `Packet / units/U-FLOW-12/packets/` ではなく `Unknown / units/U-FLOW-12/outputs/` として保存された。
+- 修正後再テストで `U-FLOW-12_Packet_Rev2.md` が `Packet / units/U-FLOW-12/packets/ / rev 2` として保存されることを確認した。
+- TC-12 の Packet / Unknown filter でも修正後状態が期待通りであることを確認した。
 
 ## 2. Environment
 
@@ -134,6 +136,60 @@ U-FLOW-12_DebugReport_20260506_120000_Rev2.md -> Report / units/U-FLOW-12/report
 U-FLOW-12_Code_Rev2.ts -> Code / units/U-FLOW-12/outputs/
 ```
 
+## 4.1 Retest Result
+
+Retest Judgment: PASS
+
+Retest Scope:
+
+- TC-11 同名衝突・Rev 候補
+- TC-12 Saved Artifacts 一覧・フィルタの関連確認
+
+Retest Preconditions:
+
+- 修正後コードで `npm.cmd run build` PASS
+- `localStorage.removeItem("tri-ai-saved-artifacts"); location.reload();` により保存済みArtifactを初期化
+
+Retest Steps:
+
+1. `U-FLOW-12_Packet.md` を保存する。
+2. 同じ Role Output を再度貼り付ける。
+3. `Use Suggested Rev` を押す。
+4. `Artifact Save` を押す。
+5. Saved Artifacts 一覧と Type filter を確認する。
+
+Retest Expected:
+
+```text
+U-FLOW-12_Packet_Rev2.md
+Packet / units/U-FLOW-12/packets/ / rev 2
+```
+
+Retest Actual:
+
+```text
+U-FLOW-12_Packet_Rev2.md
+Packet / units/U-FLOW-12/packets/ / role PM / step main-01 / Draft/main / rev 2
+```
+
+Filter Confirmation:
+
+```text
+Type filter: Packet
+Showing: 2
+- U-FLOW-12_Packet_Rev2.md
+- U-FLOW-12_Packet.md
+
+Type filter: Unknown
+Showing: 0
+```
+
+Retest Result:
+
+- TC-11: PASS
+- TC-12 related filter confirmation: PASS
+- Critical C-1: Resolved
+
 ## 5. Evidence Highlights
 
 ### TC-02 Packet save
@@ -214,25 +270,27 @@ Do not call a Worker API.
 
 ## 6. Final Judgment
 
-Final Judgment: FAIL
+Final Judgment: PASS after retest
 
-Pass count:
+Initial Pass count:
 
 - PASS: TC-01, TC-02, TC-03, TC-04, TC-05, TC-05 subcases, TC-06, TC-07, TC-08, TC-09, TC-10, TC-10A, TC-12, TC-13, TC-14, TC-15, TC-16, TC-17, TC-18, TC-19
 
-Fail count:
+Initial Fail count:
 
 - FAIL: TC-11
 
-Blocking Issue:
+Retest:
 
-- Rev付き Artifact 名で Artifact Type 判定が崩れる Critical 不具合
+- TC-11 PASS
+- TC-12 related filter confirmation PASS
+- Blocking issue resolved
 
 ## 7. Recommended Next Action
 
-1. TC-11 を BugReport / ReworkInstruction として Worker または Integrator-S に差し戻す。
-2. Rev付きファイル名の Artifact Type 判定を修正する。
-3. 修正後、最低限以下を再実施する。
+1. U-FLOW-12 を実機テスト PASS として扱う。
+2. Worker / Integrator-S には TC-11 Critical が修正済みであることを共有する。
+3. 今後の回帰確認では最低限以下を再実施する。
 
 ```text
 TC-02
@@ -251,9 +309,8 @@ TC-14
 
 ## 8. Rework Target
 
-Recommended TargetRole: Worker
+Recommended TargetRole: none
 
 Reason:
 
-- 実装ロジックの修正対象は Artifact Type detection / analysis logic と推定されるため。
-- Packet / Spec の追加設計判断ではなく、既存仕様に対する実装不具合の修正として扱える。
+- 再テストで Critical 不具合が解消されたため、現時点の追加Reworkは不要。
