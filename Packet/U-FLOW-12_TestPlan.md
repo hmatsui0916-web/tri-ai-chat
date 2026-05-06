@@ -169,6 +169,14 @@ File: ../../evil/U-FLOW-12_Packet.md
 Path traversal should be stripped to leaf file name.
 ```
 
+### TD-11 Code Artifact
+
+```text
+File: U-FLOW-12_Code.ts
+
+export const artifactSaveRuntimeSmoke = true;
+```
+
 ## 8. Test Cases
 
 ## TC-01 Artifact Save Runtime パネル表示
@@ -221,6 +229,8 @@ Path traversal should be stripped to leaf file name.
 ## TC-03 Next-line File 抽出・Spec 保存
 
 目的: `File:` の次行にあるファイル名を抽出できることを確認する。
+
+根拠: U-FLOW-12_Packet.md Section 8.2 `File:` Extraction の許容例に `File:\nU-FLOW-12_Packet.md` が明記されているため、本TCでは next-line fallback を確認対象にする。
 
 手順:
 
@@ -278,6 +288,19 @@ Path traversal should be stripped to leaf file name.
 - PMDecision Phase: `SpecApproval`
 - Logical Path: `units/U-FLOW-12/decisions/`
 - 保存できる。
+
+追加サブケース:
+
+1. `Role Output` に `File: U-FLOW-12_PMDecision_WorkerApproval.md` を含む本文を貼り付ける。
+2. Analysis preview を確認し、必要なら保存する。
+3. `File: U-FLOW-12_PMDecision_Conditional.md` と `File: U-FLOW-12_PMDecision_Hold.md` も同様に確認する。
+
+追加期待結果:
+
+- Artifact Type: `Decision`
+- PMDecision Phase: `WorkerApproval` / `Conditional` / `Hold`
+- Phase-less PMDecision としてブロックされない。
+- Logical Path: `units/U-FLOW-12/decisions/`
 
 判定: PASS / FAIL
 
@@ -390,6 +413,30 @@ Path traversal should be stripped to leaf file name.
 
 ---
 
+## TC-10A Code 種別判定
+
+目的: `*_Code.*` ファイルが Code 種別として `outputs/` に保存されることを確認する。
+
+手順:
+
+1. `Role Output` に TD-11 を貼り付ける。
+2. Analysis preview を確認する。
+3. `Artifact Save` を押す。
+4. Saved Artifacts 一覧を確認する。
+
+期待結果:
+
+- Extracted File: `U-FLOW-12_Code.ts`
+- Final File: `U-FLOW-12_Code.ts`
+- Artifact Type: `Code`
+- Logical Path: `units/U-FLOW-12/outputs/`
+- 保存できる。
+- Saved Artifacts 一覧に Code として表示される。
+
+判定: PASS / FAIL
+
+---
+
 ## TC-11 同名衝突・Rev 候補
 
 目的: 同一 logicalPath 内の同名保存をブロックし、`_RevN` 候補を提示できることを確認する。
@@ -482,7 +529,7 @@ Path traversal should be stripped to leaf file name.
 
 手順:
 
-1. TC-09 で保存した DebugReport を Saved Artifacts から探す。
+1. TC-09 step 2 で保存した `U-FLOW-12_DebugReport_20260506_120000.md` を Saved Artifacts から探す。
 2. `Runtime input key` を `debug_report` にする。
 3. `Use as Input: debug_report` を押す。
 4. `Runtime input key` を `infra_result` にする。
@@ -584,7 +631,7 @@ Path traversal should be stripped to leaf file name.
 
 PASS:
 
-- TC-01 から TC-19 がすべて PASS。
+- TC-01 から TC-19 および TC-10A がすべて PASS。
 - build が PASS。
 - 保存、一覧、Rev、Input 反映、U-FLOW-11 回帰に重大不具合がない。
 
@@ -607,7 +654,7 @@ Human への依頼:
 1. `npm.cmd run dev` で起動してください。
 2. `http://localhost:3000` を開いてください。
 3. 事前に `localStorage.removeItem("tri-ai-saved-artifacts"); location.reload();` を実行してください。
-4. TC-01 から TC-19 を順に実行してください。
+4. TC-01 から TC-19 および TC-10A を順に実行してください。
 5. 各 TC の PASS / FAIL / CONDITIONAL と証跡を記録してください。
 6. FAIL が出た場合は、該当 TC、入力データ、Analysis preview、Saved Artifacts 表示、Action Log、スクリーンショットを共有してください。
 
