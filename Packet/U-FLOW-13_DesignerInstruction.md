@@ -244,3 +244,28 @@ Designer Outputは以下を満たすこと。
 ## 12. Return Instruction
 
 Designerは、上記仕様に基づき U-FLOW-13 Phase A Spec を作成し、PMへ返却すること。
+
+## Additional Requirement: Global Policy Injection
+
+U-FLOW-13 Phase A must include a minimal Global Policy injection mechanism.
+
+The Prompt Builder / Handoff Packet Builder should apply common policies automatically, without requiring the user to paste the policy into every instruction.
+
+At minimum, the following Common Language Policy must be supported.
+
+### Common Language Policy
+
+- AI-to-AI artifacts MUST be written in English.
+- This includes Role I/O Schema, Handoff Packet, Worker Packet, Role Output, Runtime schema fields, logs, file names, and code-related artifacts.
+- PM-facing decisions, Human approval text, and strategic discussion MAY be written in Japanese.
+- English artifacts that require PM judgment SHOULD include a concise Japanese summary.
+- Existing artifacts before U-FLOW-13 do not require retroactive translation.
+
+Designer must define:
+
+- Where common policies are stored.
+- How the Prompt Builder reads common policies.
+- How policies are applied by role, step, or artifact type.
+- How the policy appears in generated Handoff Packets.
+- How PM override works when a policy needs to be bypassed.
+- How this mechanism can later support policies other than language policy.
