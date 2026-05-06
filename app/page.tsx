@@ -1386,6 +1386,10 @@ function sanitizeArtifactFileName(fileName: string): string {
   return leaf.replace(/[<>:"|?*\u0000-\u001F]/g, "_").replace(/^\.+/, "").trim();
 }
 
+function stripRevisionFromFileName(fileName: string): string {
+  return fileName.replace(/_Rev\d+(?=\.[^.]+$|$)/i, "");
+}
+
 function detectUnitId(fileName: string | null, inputs: PromptRuntimeInputs): string {
   const inputUnit = inputs.unit_id?.trim();
   const fileUnit = fileName?.match(/(U-FLOW-\d+)/i)?.[1];
@@ -1396,19 +1400,25 @@ function detectUnitId(fileName: string | null, inputs: PromptRuntimeInputs): str
 }
 
 function detectArtifactType(fileName: string): ArtifactType {
-  if (/_PMDecision_Rework_/i.test(fileName)) return "PMDecision_Rework";
-  if (/_PMDecision_/i.test(fileName)) return "Decision";
-  if (isGenericDecisionFileName(fileName)) return "Decision";
-  if (/_Spec\.md$/i.test(fileName)) return "Spec";
-  if (/_Packet\.md$/i.test(fileName)) return "Packet";
-  if (/_ReworkInstruction_/i.test(fileName)) return "ReworkInstruction";
-  if (/(Report|Result)_/i.test(fileName)) return "Report";
-  if (/_Code\.[^.]+$/i.test(fileName)) return "Code";
+  const normalizedFileName = stripRevisionFromFileName(fileName);
+  if (/_PMDecision_Rework_/i.test(normalizedFileName)) return "PMDecision_Rework";
+  if (/_PMDecision_/i.test(normalizedFileName)) return "Decision";
+  if (isGenericDecisionFileName(normalizedFileName)) return "Decision";
+  if (/_Spec\.md$/i.test(normalizedFileName)) return "Spec";
+  if (/_Packet\.md$/i.test(normalizedFileName)) return "Packet";
+  if (/_ReworkInstruction_/i.test(normalizedFileName)) return "ReworkInstruction";
+  if (/(Report|Result)_/i.test(normalizedFileName)) return "Report";
+  if (/_Code\.[^.]+$/i.test(normalizedFileName)) return "Code";
   return "Unknown";
 }
 
 function isGenericDecisionFileName(fileName: string): boolean {
-  return /_Decision\.md$/i.test(fileName) && !/_PMDecision_/i.test(fileName);
+  const normalizedFileName = stripRevisionFromFileName(fileName);
+  return /_Decision\.md$/i.test(normalizedFileName) && !/_PMDecision_/i.test(normalizedFileName);
+}
+
+function isPhaseLessPmDecisionFileName(fileName: string): boolean {
+  return /_PMDecision_?\.md$/i.test(stripRevisionFromFileName(fileName));
 }
 
 function getLogicalFolder(unitId: string, artifactType: ArtifactType): string {
@@ -1572,7 +1582,7 @@ function analyzeArtifactOutput(
   if (artifactType === "Decision" && !pmDecisionPhase) {
     errors.push("PMDecision requires a phase.");
   }
-  if (artifactType === "Decision" && /_PMDecision_?\.md$/i.test(finalFileName)) {
+  if (artifactType === "Decision" && isPhaseLessPmDecisionFileName(finalFileName)) {
     errors.push("Phase-less PMDecision file names are blocked.");
   }
   if (isGenericDecisionFileName(finalFileName)) {
@@ -1587,7 +1597,7 @@ function analyzeArtifactOutput(
     if (!targetRole || !REWORK_INSTRUCTION_TARGET_ROLES.includes(targetRole as typeof REWORK_INSTRUCTION_TARGET_ROLES[number])) {
       errors.push("ReworkInstruction requires TargetRole: Worker, Designer, or Infra.");
     }
-    if (!/_ReworkInstruction_[^_.]+_\d{8}_\d{6}\.md$/i.test(finalFileName)) {
+    if (!/_ReworkInstruction_[^_.]+_\d{8}_\d{6}(?:_Rev\d+)?\.md$/i.test(finalFileName)) {
       warnings.push(`Recommended ReworkInstruction name: ${candidateFileName}.`);
     }
   }
