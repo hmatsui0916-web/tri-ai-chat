@@ -3,7 +3,7 @@ U-FLOW-12_PMDecision_Start.md
 Role: PM
 Scope: Decision Only
 
-# U-FLOW-12 PMDecision Start
+# U-FLOW-12 PMDecision Start Rev.1
 
 ## 対象
 
@@ -12,7 +12,7 @@ Artifact Save Runtime
 
 ## 判定
 
-START
+START / Conditional修正反映済み
 
 ## 背景
 
@@ -34,6 +34,7 @@ Role OutputをArtifactとして保存し、Flow Runtime上で次stepのInputと�
 
 * Role Output受領欄
 * Output本文からの `File:` 抽出
+* `File:` 欠落時のHuman手動入力 / 候補名提示
 * Artifact種別判定
 * Unit ID判定
 * Role判定
@@ -44,7 +45,9 @@ Role OutputをArtifactとして保存し、Flow Runtime上で次stepのInputと�
 * current_stepとの紐付け
 * next_step Input候補としての参照
 * PMDecision命名Phase対応
+* PMDecision命名規則の拡張反映
 * 同名衝突防止
+* 同一Phase複数発生時のRev名提案
 
 ## Out of Scope
 
@@ -64,6 +67,40 @@ Role OutputをArtifactとして保存し、Flow Runtime上で次stepのInputと�
 `[Unit]_Decision.md` のような汎用名は禁止する。
 
 PM判断成果物は用途ごとに分離する。
+
+U-FLOW-12では、U-FLOW-10で定義したPMDecision命名規則を実運用向けに拡張する。
+
+旧定義:
+
+* `[Unit]_PMDecision_Start.md`
+* `[Unit]_PMDecision_Final.md`
+* `[Unit]_PMDecision_Rework.md`
+* `[Unit]_PMDecision_Hold.md`
+
+新定義:
+
+* `[Unit]_PMDecision_Start.md`
+* `[Unit]_PMDecision_SpecApproval.md`
+* `[Unit]_PMDecision_PacketApproval.md`
+* `[Unit]_PMDecision_WorkerApproval.md`
+* `[Unit]_PMDecision_ControlApproval.md`
+* `[Unit]_PMDecision_Final.md`
+* `[Unit]_PMDecision_Conditional.md`
+* `[Unit]_PMDecision_Hold.md`
+* `[Unit]_PMDecision_Rework_[TargetRole].md`
+
+### 改訂理由
+
+U-FLOW-10の4Phase定義では、実運用時に以下のPM判断が同名または用途不明になりやすい。
+
+* Designerへ渡す開始判断
+* Designer Spec承認
+* Integrator-S Packet承認
+* Integrator-C Verified後のPM承認
+* Human承認後のUnit完了判断
+* 差戻し判断
+
+そのため、Artifact Save Runtimeでは、PMDecisionをFlow上の用途単位で保存できるようにする。
 
 ### PMDecision形式
 
@@ -91,7 +128,75 @@ Phase:
 * `U-FLOW-12_PMDecision_PacketApproval.md`
 * `U-FLOW-12_PMDecision_ControlApproval.md`
 * `U-FLOW-12_PMDecision_Final.md`
+* `U-FLOW-12_PMDecision_Conditional.md`
 * `U-FLOW-12_PMDecision_Rework_Designer.md`
+* `U-FLOW-12_PMDecision_Rework_IntegratorS.md`
+* `U-FLOW-12_PMDecision_Rework_Worker.md`
+* `U-FLOW-12_PMDecision_Rework_Infra.md`
+
+### PMDecision Phase定義
+
+| Phase               | 用途                            |
+| ------------------- | ----------------------------- |
+| Start               | Unit開始判断 / 初回RoleへのInput      |
+| SpecApproval        | Designer Spec + Reviewer結果の承認 |
+| PacketApproval      | Integrator-S Packetの承認        |
+| WorkerApproval      | Worker実装結果に対するPM判断が必要な場合      |
+| ControlApproval     | Integrator-C Verified後のPM承認   |
+| Final               | Human最終承認後のUnit完了判断           |
+| Conditional         | 条件付き承認                        |
+| Hold                | 保留判断                          |
+| Rework_[TargetRole] | 指定Roleへの差戻し判断                 |
+
+### Rework命名規則
+
+PMDecision_Reworkは、TargetRole付き命名に改訂する。
+
+形式:
+
+`[Unit]_PMDecision_Rework_[TargetRole].md`
+
+例:
+
+* `U-FLOW-12_PMDecision_Rework_Designer.md`
+* `U-FLOW-12_PMDecision_Rework_IntegratorS.md`
+* `U-FLOW-12_PMDecision_Rework_Worker.md`
+* `U-FLOW-12_PMDecision_Rework_Infra.md`
+
+理由:
+
+Rework判断は差戻し先Roleによって内容が異なるため、TargetRoleをファイル名に含める。
+
+なお、`PMDecision_Rework` と `ReworkInstruction` は別成果物とする。
+
+* PMDecision_Rework: PMの差戻し判断
+* ReworkInstruction: Integrator-C等が作成する具体的な再投入指示
+
+### 同一Phase複数発生時の扱い
+
+原則として、1Unit内で同一PhaseのPMDecisionは1件のみとする。
+
+ただし、再承認・再判定などにより同一Phaseが複数発生する場合は、上書き禁止とし、保存時に以下の順で処理する。
+
+1. 同名ファイルが存在する場合は警告する
+2. Humanに上書き禁止を提示する
+3. 別名候補を提示する
+4. 別名形式は以下とする
+
+`[Unit]_PMDecision_[Phase]_RevN.md`
+
+例:
+
+* `U-FLOW-12_PMDecision_SpecApproval_Rev2.md`
+* `U-FLOW-12_PMDecision_ControlApproval_Rev2.md`
+
+Reworkの場合:
+
+`[Unit]_PMDecision_Rework_[TargetRole]_RevN.md`
+
+例:
+
+* `U-FLOW-12_PMDecision_Rework_Worker_Rev2.md`
 
 ### ReworkInstruction形式
 
@@ -148,6 +253,16 @@ Role Output先頭の `File:` を第一候補とする。
 
 ただし、PMDecisionなど命名衝突リスクがある成果物はRuntime側でPhase補正できること。
 
+`File:` 行が存在しない場合、Artifact Save Runtimeは自動保存を停止し、Humanへ警告を表示する。
+
+最小運用として、以下を許可する。
+
+* Humanがファイル名を手動入力する
+* RuntimeがArtifact Type / Unit / Role / current_stepから候補名を提示する
+* Human確認後に保存する
+
+ただし、Output Schema Validation完全実装は本UnitのOut of Scopeとする。
+
 ### 3. Flow Context連動
 
 保存時に以下を紐付ける。
@@ -170,6 +285,7 @@ Role Output先頭の `File:` を第一候補とする。
 
 * Role Output本文を貼り付けられる
 * `File:` 行からファイル名を抽出できる
+* `File:` 欠落時に保存を停止し、Human手動入力または候補名提示に切り替えられる
 * Artifact種別を判定できる
 * Unit IDを判定できる
 * 保存先フォルダを自動提案できる
@@ -178,9 +294,12 @@ Role Output先頭の `File:` を第一候補とする。
 * current_stepとArtifactを紐付けできる
 * next_step Prompt生成時に保存済みArtifactをInput候補として参照できる
 * PMDecisionはPhase付き命名規則で保存できる
+* PMDecision_Reworkの場合、TargetRole付き命名規則で保存できる
 * `[Unit]_Decision.md` を使用しない
 * 同名衝突時に上書きせず警告または別名提案できる
+* 同一PhaseのPMDecisionが既存の場合、上書きせず警告またはRev名を提案できる
 * ReworkInstructionはTargetRole付き命名規則で保存できる
+* U-FLOW-10の旧PMDecision命名規則をU-FLOW-12で拡張したものとして扱える
 * U-FLOW-11のChat Runtimeを壊さない
 
 ## 次アクション
@@ -202,11 +321,15 @@ Artifact Save Runtime Design
 
 * Artifact保存UI仕様
 * `File:` 抽出仕様
+* `File:` 欠落時のHuman手動入力 / 候補名提示仕様
 * Artifact種別判定仕様
 * ファイル命名規則
 * PMDecision Phase判定仕様
+* PMDecision命名規則拡張仕様
+* PMDecision_Rework TargetRole付き命名仕様
 * 保存先フォルダ判定仕様
 * 同名衝突防止仕様
+* 同一Phase複数発生時のRev名提案仕様
 * 保存済みArtifact一覧仕様
 * current_stepとの紐付け仕様
 * next_step Input参照仕様
@@ -215,3 +338,7 @@ Artifact Save Runtime Design
 ## PM判断
 
 U-FLOW-12を開始する。
+
+ただし、Designerへ回付する際は、本Rev.1の命名規則改訂を正とする。
+
+U-FLOW-10の旧PMDecision命名規則は、U-FLOW-12以降では本ルールにより拡張されたものとして扱う。
