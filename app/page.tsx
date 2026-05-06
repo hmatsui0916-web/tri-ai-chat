@@ -1398,12 +1398,17 @@ function detectUnitId(fileName: string | null, inputs: PromptRuntimeInputs): str
 function detectArtifactType(fileName: string): ArtifactType {
   if (/_PMDecision_Rework_/i.test(fileName)) return "PMDecision_Rework";
   if (/_PMDecision_/i.test(fileName)) return "Decision";
+  if (isGenericDecisionFileName(fileName)) return "Decision";
   if (/_Spec\.md$/i.test(fileName)) return "Spec";
   if (/_Packet\.md$/i.test(fileName)) return "Packet";
   if (/_ReworkInstruction_/i.test(fileName)) return "ReworkInstruction";
   if (/(Report|Result)_/i.test(fileName)) return "Report";
   if (/_Code\.[^.]+$/i.test(fileName)) return "Code";
   return "Unknown";
+}
+
+function isGenericDecisionFileName(fileName: string): boolean {
+  return /_Decision\.md$/i.test(fileName) && !/_PMDecision_/i.test(fileName);
 }
 
 function getLogicalFolder(unitId: string, artifactType: ArtifactType): string {
@@ -1569,6 +1574,9 @@ function analyzeArtifactOutput(
   }
   if (artifactType === "Decision" && /_PMDecision_?\.md$/i.test(finalFileName)) {
     errors.push("Phase-less PMDecision file names are blocked.");
+  }
+  if (isGenericDecisionFileName(finalFileName)) {
+    errors.push("Generic Decision file names are blocked. Use a phase-qualified PMDecision name such as [Unit]_PMDecision_Start.md.");
   }
   if (artifactType === "PMDecision_Rework") {
     if (!targetRole || !REWORK_TARGET_ROLES.includes(targetRole as typeof REWORK_TARGET_ROLES[number])) {
