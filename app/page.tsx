@@ -197,6 +197,25 @@ type RoleName =
   | "Infra"
   | "Integrator-C";
 
+type ExecutionEnv = "api_chat" | "vscode" | "either";
+
+type MigrationRecommendationLevel =
+  | "API Chat Recommended"
+  | "VSCode Recommended"
+  | "VSCode Strongly Recommended";
+
+type ExecutionRoutingDecision = {
+  role: RoleName;
+  defaultEnv: ExecutionEnv;
+  executionEnv: ExecutionEnv;
+  targetEnvironment: string;
+  requiresRepoAccess: boolean;
+  repoAccessReasons: string[];
+  recommendation: MigrationRecommendationLevel;
+  recommendationReasons: string[];
+  pmOverrideActive: boolean;
+};
+
 type PromptRuntimeInputs = {
   unit_id?: string;
   human_goal?: string;
@@ -419,6 +438,104 @@ const PM_DECISION_PHASES = [
 ] as const;
 const REWORK_TARGET_ROLES = ["Designer", "IntegratorS", "Worker", "Infra"] as const;
 const REWORK_INSTRUCTION_TARGET_ROLES = ["Worker", "Designer", "Infra"] as const;
+const ROLE_DEFAULT_EXECUTION_ENV: Record<RoleName, ExecutionEnv> = {
+  Human: "api_chat",
+  PM: "api_chat",
+  Designer: "api_chat",
+  Reviewer: "api_chat",
+  "Integrator-S": "api_chat",
+  Worker: "vscode",
+  Debugger: "vscode",
+  Infra: "vscode",
+  "Integrator-C": "api_chat",
+};
+const VSCODE_DEFAULT_ROLES = new Set<RoleName>(["Worker", "Debugger", "Infra"]);
+const U_FLOW_13_POLICY_CHECKLIST = [
+  "AI-to-AI artifacts must be written in English.",
+  "Preserve PM-facing Japanese summaries where useful.",
+  "Use repository access only for explicitly allowed paths.",
+  "Pre-Read Declaration is required before any file access.",
+  "Final Read Log is required.",
+  "Handoff Packet is an envelope containing the Worker Packet.",
+  "PM override and policy exemptions must be represented explicitly.",
+  "Worker handoff remains manual; send_api_request: false.",
+];
+const U_FLOW_13_DEFAULT_INPUT_ARTIFACTS = [
+  "Packet/U-FLOW-13_Spec_PhaseA_20260507.md",
+  "Packet/U-FLOW-13_PMDecision_Start.md",
+  "Packet/U-FLOW-13_PMDecision_SpecApproval.md",
+  "public/ai-business-os-flow-v1.4.json",
+  "Packet/U-FLOW-13_ReviewerReport_PhaseA_20260507_v3.md",
+];
+const U_FLOW_13_DEFAULT_ALLOWED_FILES = [
+  "Packet/U-FLOW-13_WorkerPacket_PhaseA_20260507.md",
+  "Packet/U-FLOW-13_Spec_PhaseA_20260507.md",
+  "Packet/U-FLOW-13_PMDecision_Start.md",
+  "Packet/U-FLOW-13_PMDecision_SpecApproval.md",
+  "Packet/U-FLOW-13_ReviewerReport_PhaseA_20260507_v3.md",
+  "public/ai-business-os-flow-v1.4.json",
+  "package.json",
+  "app/page.tsx",
+  "app/globals.css",
+];
+const U_FLOW_13_WORKER_OUTPUT_SCHEMA = `# U-FLOW-13 Worker Report
+
+## Decision
+
+PASS / CONDITIONAL / FAIL
+
+## Summary
+
+- 
+
+## Changed Files
+
+- 
+
+## Implementation Details
+
+- execution_env:
+- requires_repo_access:
+- migration recommendation:
+- PM override:
+- Handoff Packet generation:
+- Pre-Read / Read Log:
+- UI:
+
+## Acceptance Criteria
+
+| Criterion | Result | Notes |
+| :--- | :--- | :--- |
+| Role-based execution environment routing implemented | PASS/FAIL | |
+| execution_env can be determined per Role/Step | PASS/FAIL | |
+| requires_repo_access can be determined | PASS/FAIL | |
+| Migration recommendation and reason are displayed | PASS/FAIL | |
+| PM override is represented | PASS/FAIL | |
+| Handoff Packet envelope is generated | PASS/FAIL | |
+| Worker Packet content fields are complete | PASS/FAIL | |
+| Applied policies are included | PASS/FAIL | |
+| Policy exemptions are included | PASS/FAIL | |
+| Allowed files are included | PASS/FAIL | |
+| Pre-Read Declaration rule is included | PASS/FAIL | |
+| Read Log requirement is included | PASS/FAIL | |
+| Manual VSCode handoff remains manual | PASS/FAIL | |
+| Existing U-FLOW-11/U-FLOW-12 behavior is preserved | PASS/FAIL | |
+
+## Verification
+
+- Command:
+- Result:
+- Notes:
+
+## Read Log
+
+| file_path | reason_for_reading | timestamp |
+| :--- | :--- | :--- |
+|  |  |  |
+
+## Known Risks / Limitations
+
+- `;
 
 const providerLabels: Record<Provider, string> = {
   openai: "OpenAI",
@@ -765,6 +882,200 @@ function buildExternalHandoffText(step: ResolvedFlowStepV14): string {
     "",
     "Instruction:",
     step.instruction || "(no instruction)",
+  ].join("\n");
+}
+
+function splitLines(value: string): string[] {
+  return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+
+function formatMarkdownList(items: string[]): string {
+  return items.length ? items.map((item) => `- ${item}`).join("\n") : "- None";
+}
+
+function formatAttachmentSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function getStepTextForRouting(step: ResolvedFlowStepV14 | null): string {
+  if (!step) return "";
+  return [step.id, step.name, step.type, step.instruction, formatFlowEndpoint(step.from), formatFlowEndpoint(step.to)]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
+function resolveExecutionRouting(
+  role: RoleName,
+  step: ResolvedFlowStepV14 | null,
+  attachmentCount: number,
+  attachmentBytes: number,
+  pmOverrideEnabled: boolean,
+  pmOverrideEnv: ExecutionEnv
+): ExecutionRoutingDecision {
+  const defaultEnv = ROLE_DEFAULT_EXECUTION_ENV[role] ?? "api_chat";
+  const stepText = getStepTextForRouting(step);
+  const repoAccessReasons: string[] = [];
+  const isExternalWorkerHandoff = role === "Worker" || step?.type === "external_handoff";
+
+  if (["Worker", "Debugger", "Infra"].includes(role)) {
+    repoAccessReasons.push(`Role ${role} normally requires repository execution or verification.`);
+  }
+  if (role === "Integrator-S" && /packet|handoff|repository path|repo path|worker deployment/.test(stepText)) {
+    repoAccessReasons.push("Repository structure is required to create a reliable Worker Packet.");
+  }
+  if (/implement|code|edit|worker|indev/.test(stepText)) {
+    repoAccessReasons.push("Direct code editing is required.");
+  }
+  if (/review|diff|dependency|multi-file/.test(stepText) && role === "Reviewer") {
+    repoAccessReasons.push("Code review may involve multi-file diffs or dependency checks.");
+  }
+  if (/build|test|runtime error|debug|infra/.test(stepText)) {
+    repoAccessReasons.push("Build, test, runtime error tracing, debugging, or infrastructure work is required.");
+  }
+  if (attachmentCount > 20 || attachmentBytes > 500 * 1024) {
+    repoAccessReasons.push("Input data size is above the strong VSCode threshold.");
+  } else if (attachmentBytes > 100 * 1024) {
+    repoAccessReasons.push("Input data size may exceed practical API Chat attachment limits.");
+  }
+
+  const requiresRepoAccess = repoAccessReasons.length > 0;
+  const computedEnv: ExecutionEnv =
+    requiresRepoAccess || VSCODE_DEFAULT_ROLES.has(role) || isExternalWorkerHandoff
+      ? "vscode"
+      : defaultEnv;
+  const executionEnv = pmOverrideEnabled ? pmOverrideEnv : computedEnv;
+  const recommendationReasons: string[] = [];
+  let recommendation: MigrationRecommendationLevel = "API Chat Recommended";
+
+  if (attachmentCount > 20 || attachmentBytes > 500 * 1024) {
+    recommendation = "VSCode Strongly Recommended";
+    recommendationReasons.push("Attachments exceed 20 files or 500KB total.");
+  } else if (requiresRepoAccess || VSCODE_DEFAULT_ROLES.has(role)) {
+    recommendation = "VSCode Recommended";
+    recommendationReasons.push("requires_repo_access is true or the role defaults to VSCode execution.");
+  } else if (attachmentCount < 10 && attachmentBytes < 100 * 1024) {
+    recommendation = "API Chat Recommended";
+    recommendationReasons.push("Attachments are below 10 files and 100KB total.");
+  } else {
+    recommendationReasons.push("No VSCode trigger matched; API Chat remains suitable.");
+  }
+
+  if (pmOverrideEnabled) {
+    recommendationReasons.push(`PM Override Active: execution_env forced to ${pmOverrideEnv}.`);
+  }
+
+  return {
+    role,
+    defaultEnv,
+    executionEnv,
+    targetEnvironment: executionEnv === "vscode" ? "vscode" : "api_chat",
+    requiresRepoAccess,
+    repoAccessReasons,
+    recommendation,
+    recommendationReasons,
+    pmOverrideActive: pmOverrideEnabled,
+  };
+}
+
+function buildHandoffPacketEnvelope(params: {
+  unitId: string;
+  step: ResolvedFlowStepV14 | null;
+  routing: ExecutionRoutingDecision;
+  inputArtifacts: string[];
+  allowedFiles: string[];
+  policyExemptionText: string;
+}): string {
+  const stepId = params.step?.id || "manual";
+  const unitStepId = `${params.unitId || "U-FLOW"}-${stepId}`;
+  const policyExemptions = params.policyExemptionText.trim() || "None";
+  const preReadBlock = [
+    "## Pre-Read Declaration",
+    "",
+    "I will read only the following files:",
+    "",
+    ...params.allowedFiles.map((file) => `- ${file}`),
+    "",
+    "Reason: execute only the approved Worker Packet within the declared repository access scope.",
+  ].join("\n");
+
+  return [
+    `# Handoff Packet ${unitStepId}`,
+    "",
+    "## Envelope Metadata",
+    `- Unit ID: ${params.unitId || "(none)"}`,
+    `- Step ID: ${stepId}`,
+    `- Route Context: ${params.step?.route_context || "feedback_specification"}`,
+    `- Target Role: ${params.routing.role}`,
+    `- Target Environment: ${params.routing.targetEnvironment}`,
+    `- execution_env: ${params.routing.executionEnv}`,
+    `- requires_repo_access: ${params.routing.requiresRepoAccess}`,
+    `- Migration Recommendation: ${params.routing.recommendation}`,
+    `- Recommendation Reasons: ${params.routing.recommendationReasons.join("; ")}`,
+    `- PM Override Active: ${params.routing.pmOverrideActive ? "Yes" : "No"}`,
+    "- send_api_request: false",
+    "- Handoff Target: VSCode Copilot",
+    "- Handoff Type: manual external handoff",
+    "- Applied Policies:",
+    ...U_FLOW_13_POLICY_CHECKLIST.map((policy) => `  - ${policy}`),
+    `- Policy Exemptions: ${policyExemptions}`,
+    '- Ambiguity Handling: "Return to PM via Handoff Return. Do not guess."',
+    "",
+    "## Content (The Worker Packet)",
+    `- Mission: Execute ${unitStepId} using only the supplied Worker Packet and allowed repository files.`,
+    "- Scope: Phase A implementation or verification work explicitly assigned by this handoff.",
+    "- Prohibitions:",
+    "  - Do not read undeclared files.",
+    "  - Do not modify Flow v1.4 JSON.",
+    "  - Do not create an automated Worker API integration.",
+    "  - Do not bypass human gates.",
+    "  - Do not infer missing PM decisions.",
+    "- Input Artifacts:",
+    ...params.inputArtifacts.map((artifact) => `  - ${artifact}`),
+    "- Allowed Files:",
+    ...params.allowedFiles.map((file) => `  - ${file}`),
+    "- Expected Output: Worker Report with summary, changed files, verification, acceptance checklist, known risks, and Read Log.",
+    "- Output Schema:",
+    "",
+    "```markdown",
+    U_FLOW_13_WORKER_OUTPUT_SCHEMA,
+    "```",
+    "",
+    "- Return Method: paste output to chat or attach a file.",
+    "",
+    "## Safety Protocols",
+    "- Pre-Read Declaration: REQUIRED before any file access.",
+    "- Read Log: REQUIRED in the final Output.",
+    "- Read Log will be cross-checked against the Pre-Read Declaration during inbound processing.",
+    "",
+    "### Required Pre-Read Declaration",
+    "",
+    "```markdown",
+    preReadBlock,
+    "```",
+    "",
+    "### Required Read Log",
+    "",
+    "```markdown",
+    "## Read Log",
+    "",
+    "| file_path | reason_for_reading | timestamp |",
+    "| :--- | :--- | :--- |",
+    "|  |  |  |",
+    "```",
+    "",
+    "## Violation Fallback",
+    "",
+    "| Violation | Handling |",
+    "| :--- | :--- |",
+    "| Missing Pre-Read Declaration | Reject -> Rework |",
+    "| Reading undeclared files | Reject -> Rework |",
+    "| Missing or incomplete Read Log | Reject -> Request Correction or Re-Handoff |",
+    "| Output Schema violation | Reject -> Re-Handoff |",
+    "| Guessing ambiguity | Handoff Return to PM |",
+    "| Environment mismatch without PM override | Warning to PM |",
   ].join("\n");
 }
 
@@ -2065,6 +2376,11 @@ export default function Home() {
   const [stagedPromptsByColumn, setStagedPromptsByColumn] = useState<Partial<Record<ColumnId, StagedColumnPrompt[]>>>({});
   const [stagedStepSummaries, setStagedStepSummaries] = useState<StagedStepSummary[]>([]);
   const [showFlowRuntimePanel, setShowFlowRuntimePanel] = useState(true);
+  const [pmEnvOverrideEnabled, setPmEnvOverrideEnabled] = useState(false);
+  const [pmEnvOverrideValue, setPmEnvOverrideValue] = useState<ExecutionEnv>("vscode");
+  const [policyExemptionText, setPolicyExemptionText] = useState("");
+  const [handoffInputArtifactsText, setHandoffInputArtifactsText] = useState(U_FLOW_13_DEFAULT_INPUT_ARTIFACTS.join("\n"));
+  const [handoffAllowedFilesText, setHandoffAllowedFilesText] = useState(U_FLOW_13_DEFAULT_ALLOWED_FILES.join("\n"));
   const abortRef = useRef<AbortController | null>(null);
 
   const columnIds = useMemo(() => columns.map((column) => column.id), [columns]);
@@ -2229,6 +2545,48 @@ export default function Home() {
     if (currentStep.template_unresolved) return false;
     return currentStep.type === "join";
   }, [currentStep, selectedFlow]);
+
+  const handoffTargetRoles = useMemo(() => {
+    if (!currentStep || !isFlowV14(selectedFlow) || currentStep.template_unresolved) return [] as RoleName[];
+    return resolveTargetRoles(currentStep, selectedFlow, selectedDecision);
+  }, [currentStep, selectedFlow, selectedDecision]);
+
+  const primaryHandoffRole = handoffTargetRoles[0] ?? "Worker";
+  const attachmentBytes = useMemo(
+    () => attachments.reduce((total, attachment) => total + attachment.size, 0),
+    [attachments]
+  );
+  const executionRouting = useMemo(
+    () =>
+      resolveExecutionRouting(
+        primaryHandoffRole,
+        currentStep,
+        attachments.length,
+        attachmentBytes,
+        pmEnvOverrideEnabled,
+        pmEnvOverrideValue
+      ),
+    [primaryHandoffRole, currentStep, attachments.length, attachmentBytes, pmEnvOverrideEnabled, pmEnvOverrideValue]
+  );
+  const generatedHandoffPacket = useMemo(
+    () =>
+      buildHandoffPacketEnvelope({
+        unitId: parsedArtifactRuntimeInputs.unit_id || "U-FLOW",
+        step: currentStep,
+        routing: executionRouting,
+        inputArtifacts: splitLines(handoffInputArtifactsText),
+        allowedFiles: splitLines(handoffAllowedFilesText),
+        policyExemptionText,
+      }),
+    [
+      parsedArtifactRuntimeInputs.unit_id,
+      currentStep,
+      executionRouting,
+      handoffInputArtifactsText,
+      handoffAllowedFilesText,
+      policyExemptionText,
+    ]
+  );
 
   useEffect(() => {
     const templateUnresolved = currentStep?.template_unresolved === true || flowRuntimeNextSteps.some((step) => step.template_unresolved === true);
@@ -2679,6 +3037,24 @@ export default function Home() {
       setCopyStatus("Failed to copy generated prompts");
       window.setTimeout(() => setCopyStatus(""), 1800);
     }
+  };
+
+  const copyGeneratedHandoffPacket = async () => {
+    try {
+      await navigator.clipboard.writeText(generatedHandoffPacket);
+      setCopyStatus("Handoff Packet copied");
+      window.setTimeout(() => setCopyStatus(""), 1800);
+    } catch (err) {
+      setCopyStatus(`Copy failed: ${err instanceof Error ? err.message : String(err)}`);
+      window.setTimeout(() => setCopyStatus(""), 2200);
+    }
+  };
+
+  const stageGeneratedHandoffPacketAsArtifact = () => {
+    setArtifactOutputText(generatedHandoffPacket);
+    setArtifactManualFileName(`${parsedArtifactRuntimeInputs.unit_id || "U-FLOW"}_HandoffPacket_${currentStep?.id || "manual"}.md`);
+    setCopyStatus("Handoff Packet staged in Artifact Save Runtime");
+    window.setTimeout(() => setCopyStatus(""), 1800);
   };
 
   const stageGeneratedPromptsInComposer = () => {
@@ -4159,6 +4535,146 @@ export default function Home() {
                       ))}
                     </div>
                   )}
+                </div>
+              </div>
+
+              {/* U-FLOW-13 Handoff Runtime */}
+              <div style={{ marginBottom: "16px", padding: "12px", backgroundColor: "#fff", borderRadius: "4px", border: "1px solid #cce5ff" }}>
+                <div style={{ fontSize: "0.95em", fontWeight: "bold", marginBottom: "8px" }}>U-FLOW-13 Handoff Runtime</div>
+                <div style={{ display: "grid", gap: "10px" }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "8px", fontSize: "0.85em", lineHeight: 1.6 }}>
+                    <div style={{ padding: "8px", backgroundColor: "#f8f9fa", border: "1px solid #e5e7eb", borderRadius: "6px" }}>
+                      <strong>Role</strong>
+                      <div>{executionRouting.role}</div>
+                    </div>
+                    <div style={{ padding: "8px", backgroundColor: "#f8f9fa", border: "1px solid #e5e7eb", borderRadius: "6px" }}>
+                      <strong>execution_env</strong>
+                      <div>{executionRouting.executionEnv}</div>
+                    </div>
+                    <div style={{ padding: "8px", backgroundColor: "#f8f9fa", border: "1px solid #e5e7eb", borderRadius: "6px" }}>
+                      <strong>requires_repo_access</strong>
+                      <div>{executionRouting.requiresRepoAccess ? "true" : "false"}</div>
+                    </div>
+                    <div style={{ padding: "8px", backgroundColor: "#f8f9fa", border: "1px solid #e5e7eb", borderRadius: "6px" }}>
+                      <strong>Recommendation</strong>
+                      <div>{executionRouting.recommendation}</div>
+                    </div>
+                  </div>
+
+                  <div style={{ padding: "8px", backgroundColor: "#f8f9fa", border: "1px solid #e5e7eb", borderRadius: "6px", fontSize: "0.82em", lineHeight: 1.6 }}>
+                    <div><strong>Target Environment:</strong> {executionRouting.targetEnvironment}</div>
+                    <div><strong>Attachment Load:</strong> {attachments.length} file(s), {formatAttachmentSize(attachmentBytes)}</div>
+                    <div><strong>Route Context:</strong> {currentStep?.route_context || flowRuntimeState.routeContext}</div>
+                    <div><strong>Manual Handoff:</strong> send_api_request: false / VSCode Copilot</div>
+                    <div><strong>Repo Access Reason(s):</strong></div>
+                    <div style={{ whiteSpace: "pre-wrap" }}>{formatMarkdownList(executionRouting.repoAccessReasons)}</div>
+                    <div style={{ marginTop: "6px" }}><strong>Recommendation Reason(s):</strong></div>
+                    <div style={{ whiteSpace: "pre-wrap" }}>{formatMarkdownList(executionRouting.recommendationReasons)}</div>
+                  </div>
+
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "8px" }}>
+                    <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.85em", cursor: "pointer" }}>
+                      <input
+                        type="checkbox"
+                        checked={pmEnvOverrideEnabled}
+                        onChange={(e) => setPmEnvOverrideEnabled(e.target.checked)}
+                      />
+                      <span>PM environment override</span>
+                    </label>
+                    <label style={{ display: "grid", gap: "4px", fontSize: "0.85em" }}>
+                      Override execution_env
+                      <select
+                        value={pmEnvOverrideValue}
+                        onChange={(e) => setPmEnvOverrideValue(e.target.value as ExecutionEnv)}
+                        disabled={!pmEnvOverrideEnabled}
+                        style={{ padding: "6px", border: "1px solid #d1d5db", borderRadius: "4px" }}
+                      >
+                        <option value="api_chat">api_chat</option>
+                        <option value="vscode">vscode</option>
+                        <option value="either">either</option>
+                      </select>
+                    </label>
+                  </div>
+                  {executionRouting.pmOverrideActive && (
+                    <div style={{ padding: "8px", border: "1px solid #ffd8a8", borderRadius: "4px", backgroundColor: "#fff9db", color: "#7c4a00", fontSize: "0.82em" }}>
+                      PM Override Active
+                    </div>
+                  )}
+
+                  <label style={{ display: "grid", gap: "4px", fontSize: "0.85em" }}>
+                    Policy exemption metadata
+                    <input
+                      value={policyExemptionText}
+                      onChange={(e) => setPolicyExemptionText(e.target.value)}
+                      placeholder="None"
+                      style={{ padding: "6px", border: "1px solid #d1d5db", borderRadius: "4px" }}
+                    />
+                  </label>
+
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: "8px" }}>
+                    <label style={{ display: "grid", gap: "4px", fontSize: "0.85em" }}>
+                      Input Artifacts
+                      <textarea
+                        value={handoffInputArtifactsText}
+                        onChange={(e) => setHandoffInputArtifactsText(e.target.value)}
+                        spellCheck={false}
+                        style={{
+                          width: "100%",
+                          minHeight: "100px",
+                          resize: "vertical",
+                          padding: "8px",
+                          border: "1px solid #d1d5db",
+                          borderRadius: "8px",
+                          fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                          fontSize: "12px",
+                          lineHeight: 1.45,
+                        }}
+                      />
+                    </label>
+                    <label style={{ display: "grid", gap: "4px", fontSize: "0.85em" }}>
+                      Allowed Files
+                      <textarea
+                        value={handoffAllowedFilesText}
+                        onChange={(e) => setHandoffAllowedFilesText(e.target.value)}
+                        spellCheck={false}
+                        style={{
+                          width: "100%",
+                          minHeight: "100px",
+                          resize: "vertical",
+                          padding: "8px",
+                          border: "1px solid #d1d5db",
+                          borderRadius: "8px",
+                          fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                          fontSize: "12px",
+                          lineHeight: 1.45,
+                        }}
+                      />
+                    </label>
+                  </div>
+
+                  <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                    <button
+                      type="button"
+                      onClick={() => void copyGeneratedHandoffPacket()}
+                      style={{ padding: "6px 12px", fontSize: "0.85em", backgroundColor: "#495057", color: "#fff", border: "none", borderRadius: "4px", cursor: "pointer" }}
+                    >
+                      Copy Handoff Packet
+                    </button>
+                    <button
+                      type="button"
+                      onClick={stageGeneratedHandoffPacketAsArtifact}
+                      style={{ padding: "6px 12px", fontSize: "0.85em", backgroundColor: "#12b886", color: "#fff", border: "none", borderRadius: "4px", cursor: "pointer" }}
+                    >
+                      Stage as Artifact
+                    </button>
+                  </div>
+
+                  <details>
+                    <summary style={{ cursor: "pointer", fontWeight: 700, fontSize: "0.85em" }}>Generated Handoff Packet</summary>
+                    <pre style={{ margin: "8px 0 0", padding: "10px", maxHeight: "280px", overflow: "auto", whiteSpace: "pre-wrap", backgroundColor: "#f8f9fa", border: "1px solid #e5e7eb", borderRadius: "6px", fontSize: "12px" }}>
+                      {generatedHandoffPacket}
+                    </pre>
+                  </details>
                 </div>
               </div>
 
