@@ -1,0 +1,78 @@
+{
+  "flow_id": "ai-business-os-mini-v1",
+  "description": "Mini AI Business OS flow for role-specific multi-provider smoke execution.",
+  "steps": [
+    {
+      "step": 1,
+      "role": "pm",
+      "displayName": "PM",
+      "stem": "01-pm",
+      "instructionFile": "pm.md",
+      "executor": "codex"
+    },
+    {
+      "step": 2,
+      "role": "designer",
+      "displayName": "Designer",
+      "stem": "02-designer",
+      "instructionFile": "designer.md",
+      "executor": "claude"
+    },
+    {
+      "step": 3,
+      "role": "reviewer",
+      "displayName": "Reviewer",
+      "stem": "03-reviewer",
+      "instructionFile": "reviewer.md",
+      "executor": "gemini"
+    },
+    {
+      "step": 4,
+      "role": "pm-decision",
+      "displayName": "PM-Decision",
+      "stem": "04-pm-decision",
+      "instructionFile": "pm-decision.md",
+      "executor": "codex"
+    },
+    {
+      "step": 5,
+      "role": "integrator-s",
+      "displayName": "Integrator-S",
+      "stem": "05-integrator-s",
+      "instructionFile": "integrator-s.md",
+      "executor": "claude"
+    },
+    {
+      "step": 6,
+      "role": "worker",
+      "displayName": "Worker",
+      "stem": "06-worker",
+      "instructionFile": "worker.md",
+      "executor": "codex"
+    },
+    {
+      "step": 7,
+      "role": "debugger",
+      "displayName": "Debugger",
+      "stem": "07-debugger",
+      "instructionFile": "debugger.md",
+      "executor": "gemini"
+    },
+    {
+      "step": 8,
+      "role": "integrator-c",
+      "displayName": "Integrator-C",
+      "stem": "08-integrator-c",
+      "instructionFile": "integrator-c.md",
+      "executor": "codex"
+    },
+    {
+      "step": 9,
+      "role": "pm-final-decision",
+      "displayName": "PM-FinalDecision",
+      "stem": "09-pm-final-decision",
+      "instructionFile": "pm-final-decision.md",
+      "executor": "codex"
+    }
+  ]
+}
