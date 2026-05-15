@@ -1,5 +1,17 @@
 .next
 node_modules
-.env.local
+.env
+.env.*
+!.env.example
 dist
 .DS_Store
+runs/
+CognitiveOS_Runtime_Workspace/
+.claude/
+
+# Raw/local session material. Promote curated inputs deliberately.
+input/my-session-note.md
+input/サブスクチャットのセッション内容.md
+
+# Local TypeScript incremental cache.
+*.tsbuildinfo
