@@ -1,5 +1,5 @@
 // @ts-ignore Node 24 runs this local CLI directly from TypeScript source.
-import { cognitiveDbPaths, cognitiveDbStatus, createWorkingSnapshot, exportCognitiveDbSummary, exportRehydrationPacket, exportStateHandoff, importCognitiveHandoff, ingestCognitiveOsInputFiles, initCognitiveDb, listHumanDecisions, listInboxItems, listOutboxItems, listPendingDecisions, listWorkingSnapshots, normalizeWorkingSnapshot, promoteInboxItemToSnapshot, readInboxItem, readOutboxItem, readPendingDecision, readWorkingSnapshot, recordHumanDecision, snapshotizeInboxItem, updateInboxItemStatus, updateWorkingSnapshotStatus } from "./cognitiveDb.ts";
+import { buildReversibilityCheckPacket, cognitiveDbPaths, cognitiveDbStatus, createWorkingSnapshot, exportCognitiveDbSummary, exportRehydrationPacket, exportStateHandoff, importCognitiveHandoff, ingestCognitiveOsInputFiles, initCognitiveDb, listHumanDecisions, listInboxItems, listOutboxItems, listPendingDecisions, listWorkingSnapshots, normalizeWorkingSnapshot, promoteInboxItemToSnapshot, readInboxItem, readOutboxItem, readPendingDecision, readWorkingSnapshot, recordHumanDecision, snapshotizeInboxItem, updateInboxItemStatus, updateWorkingSnapshotStatus } from "./cognitiveDb.ts";
 
 type ExecutorName = "mock" | "codex" | "claude" | "gemini";
 
@@ -62,6 +62,7 @@ function usage(): string {
     "  npm run cognitive-db -- list-human-decisions",
     "  npm run cognitive-db -- list-snapshots",
     "  npm run cognitive-db -- show-snapshot <WSNAP-ID>",
+    "  npm run cognitive-db -- reversibility-check <WSNAP-ID>",
     "  npm run cognitive-db -- set-snapshot-status <WSNAP-ID> <draft|active|ready|closed|archived|superseded|reopened>",
     "  npm run cognitive-db -- mark-snapshot-ready <WSNAP-ID>",
     "  npm run cognitive-db -- close-snapshot <WSNAP-ID>",
@@ -370,6 +371,16 @@ async function main(): Promise<void> {
       }
 
       console.log(snapshot.body);
+      return;
+    }
+    case "reversibility-check": {
+      const snapshotId = process.argv[3];
+      if (!snapshotId) {
+        throw new Error("reversibility-check requires a snapshot id.");
+      }
+
+      const packet = await buildReversibilityCheckPacket(snapshotId);
+      console.log(packet.trimEnd());
       return;
     }
     case "set-snapshot-status": {

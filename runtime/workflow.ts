@@ -37,6 +37,8 @@ type RunLog = {
   workflow_version: "v0";
   flow_id: string;
   flow_path: string | null;
+  profile_id: string | null;
+  profile_path: string | null;
   human_note_path: string | null;
   input_path: string;
   run_folder: string;
@@ -69,6 +71,7 @@ type CliOptions =
     executor: ExecutorName;
     externalRole: string;
     flowPath: string | null;
+    profilePath: string | null;
     humanNotePath: string | null;
   } & (
     | {
@@ -86,6 +89,14 @@ type FlowDefinition = {
   flow_id: string;
   description?: string;
   steps: RoleDefinition[];
+};
+
+type ExecutorProfile = {
+  profile_id: string;
+  description?: string;
+  assignments: Record<string, ExecutorName>;
+  role_intent?: Record<string, string>;
+  fallbacks?: Partial<Record<ExecutorName, ExecutorName>>;
 };
 
 const roleSequence: RoleDefinition[] = [
@@ -202,6 +213,7 @@ function buildRuntimeContext(input: {
   runFolder: string;
   role: RoleDefinition;
   flowPath: string | null;
+  profilePath: string | null;
   humanNote: null | {
     path: string;
     content: string;
@@ -213,11 +225,13 @@ function buildRuntimeContext(input: {
     path.join(input.runFolder, "worker_artifacts"),
   );
   const flowPart = input.flowPath ? ` --flow ${input.flowPath}` : "";
-  const reviewerResumeCommand = `npm.cmd run workflow -- --resume ${runFolderPath} --from designer${flowPart}`;
-  const workerResumeCommand = `npm.cmd run workflow -- --resume ${runFolderPath} --from worker${flowPart}`;
+  const profilePart = input.profilePath ? ` --profile ${input.profilePath}` : "";
+  const reviewerResumeCommand = `npm.cmd run workflow -- --resume ${runFolderPath} --from designer${flowPart}${profilePart}`;
+  const workerResumeCommand = `npm.cmd run workflow -- --resume ${runFolderPath} --from worker${flowPart}${profilePart}`;
   const sharedContext = [
     `Run folder: ${runFolderPath}`,
     `Flow path: ${input.flowPath ?? "default-v0"}`,
+    `Executor profile path: ${input.profilePath ?? "none"}`,
     `Reviewer rework resume command: ${reviewerResumeCommand}`,
     `Debugger rework resume command: ${workerResumeCommand}`,
     `Worker artifact sandbox: ${workerArtifactFolder}`,
@@ -238,10 +252,14 @@ function buildRuntimeContext(input: {
 
   return [
     ...sharedContext,
-    "To create physical files, include markdown code blocks using this exact shape:",
+    "To create physical files, include markdown code blocks using this shape:",
     '```artifact path="relative/path/from/worker_artifacts"',
     "file content",
     "```",
+    "If the file content itself contains markdown code fences, use a longer artifact fence such as:",
+    '````artifact path="relative/path/from/worker_artifacts"',
+    "file content that may contain ``` fenced blocks",
+    "````",
     "Artifact paths must be relative and must stay inside the worker artifact sandbox.",
     input.sourceContext?.trim()
       ? `\n## Worker Source Context\n\n${input.sourceContext.trim()}`
@@ -295,13 +313,13 @@ async function buildWorkerSourceContext(input: {
 function parseWorkerArtifacts(output: string): WorkerArtifact[] {
   const artifacts: WorkerArtifact[] = [];
   const artifactPattern =
-    /^```artifact\s+path=(?:"([^"]+)"|'([^']+)'|([^\s]+))\s*\r?\n([\s\S]*?)^```/gm;
+    /^(`{3,})artifact\s+path=(?:"([^"]+)"|'([^']+)'|([^\s]+))\s*\r?\n([\s\S]*?)^\1\s*$/gm;
   let match: RegExpExecArray | null;
 
   while ((match = artifactPattern.exec(output)) !== null) {
     artifacts.push({
-      relativePath: match[1] || match[2] || match[3],
-      content: match[4],
+      relativePath: match[2] || match[3] || match[4],
+      content: match[5],
     });
   }
 
@@ -395,8 +413,8 @@ async function materializeWorkerArtifacts(input: {
 function usage(): string {
   return [
     "Usage:",
-    "  npm run workflow -- input/request.md [--executor mock|codex|claude|gemini] [--external-role pm] [--flow runtime/flows/ai-business-os-mini-v1.json]",
-    "  npm run workflow -- --resume runs/<run_id> --from <role> [--human-note input/human-note.md] [--executor mock|codex|claude|gemini] [--external-role pm] [--flow runtime/flows/ai-business-os-mini-v1.json]",
+    "  npm run workflow -- input/request.md [--executor mock|codex|claude|gemini] [--external-role pm] [--flow runtime/flows/ai-business-os-mini-v1.json] [--profile runtime/profiles/ai-business-os-starter-v1.json]",
+    "  npm run workflow -- --resume runs/<run_id> --from <role> [--human-note input/human-note.md] [--executor mock|codex|claude|gemini] [--external-role pm] [--flow runtime/flows/ai-business-os-mini-v1.json] [--profile runtime/profiles/ai-business-os-starter-v1.json]",
   ].join("\n");
 }
 
@@ -440,6 +458,14 @@ function parseCliArgs(args: string[]): CliOptions {
   }
   const flowPath =
     flowIndex >= 0 ? args[flowIndex + 1] : process.env.AI_WORKFLOW_FLOW || null;
+  const profileIndex = args.indexOf("--profile");
+  if (profileIndex >= 0 && !args[profileIndex + 1]) {
+    throw new Error(`--profile requires a path. ${usage()}`);
+  }
+  const profilePath =
+    profileIndex >= 0
+      ? args[profileIndex + 1]
+      : process.env.AI_WORKFLOW_PROFILE || null;
   const humanNoteIndex = args.indexOf("--human-note");
   if (humanNoteIndex >= 0 && !args[humanNoteIndex + 1]) {
     throw new Error(`--human-note requires a path. ${usage()}`);
@@ -453,10 +479,12 @@ function parseCliArgs(args: string[]): CliOptions {
       args[index] !== "--executor" &&
       args[index] !== "--external-role" &&
       args[index] !== "--flow" &&
+      args[index] !== "--profile" &&
       args[index] !== "--human-note" &&
       previous !== "--executor" &&
       previous !== "--external-role" &&
       previous !== "--flow" &&
+      previous !== "--profile" &&
       previous !== "--human-note"
     );
   });
@@ -478,6 +506,7 @@ function parseCliArgs(args: string[]): CliOptions {
       executor,
       externalRole,
       flowPath,
+      profilePath,
       humanNotePath,
     };
   }
@@ -494,6 +523,7 @@ function parseCliArgs(args: string[]): CliOptions {
     executor,
     externalRole,
     flowPath,
+    profilePath,
     humanNotePath,
   };
 }
@@ -603,6 +633,52 @@ async function readFlowDefinition(flowPath: string | null): Promise<{
   };
 }
 
+async function readExecutorProfile(
+  profilePath: string | null,
+): Promise<{
+  profileId: string | null;
+  profilePath: string | null;
+  profile: ExecutorProfile | null;
+}> {
+  if (!profilePath) {
+    return {
+      profileId: null,
+      profilePath: null,
+      profile: null,
+    };
+  }
+
+  const absoluteProfilePath = path.resolve(workspaceRoot, profilePath);
+  const rawProfile = await readFile(absoluteProfilePath, "utf8");
+  const profile = JSON.parse(rawProfile) as ExecutorProfile;
+
+  if (!profile.profile_id) {
+    throw new Error(`Executor profile "${profilePath}" is missing profile_id.`);
+  }
+  if (!profile.assignments || typeof profile.assignments !== "object") {
+    throw new Error(
+      `Executor profile "${profilePath}" is missing assignments.`,
+    );
+  }
+
+  for (const [roleName, executor] of Object.entries(profile.assignments)) {
+    try {
+      parseExecutorName(executor);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `Executor profile "${profilePath}" has invalid executor for role "${roleName}": ${message}`,
+      );
+    }
+  }
+
+  return {
+    profileId: profile.profile_id,
+    profilePath: toWorkspacePath(absoluteProfilePath),
+    profile,
+  };
+}
+
 async function readHumanRequest(inputArg: string): Promise<{
   inputPath: string;
   humanRequest: string;
@@ -657,16 +733,18 @@ function buildRuntimeHumanGate(input: {
   role: RoleDefinition;
   runFolder: string;
   flowPath: string | null;
+  profilePath: string | null;
 }): string {
   const runFolderPath = toWorkspacePath(input.runFolder);
   const flowPart = input.flowPath ? ` --flow ${input.flowPath}` : "";
+  const profilePart = input.profilePath ? ` --profile ${input.profilePath}` : "";
   const resumeFrom = input.role.role === "reviewer" ? "designer" : "worker";
   const humanNotePath =
     input.role.role === "reviewer"
       ? "input/humangate-reviewer-approval.md"
       : "input/humangate-debugger-fix.md";
   const resumeCommand =
-    `npm.cmd run workflow -- --resume ${runFolderPath} --from ${resumeFrom} --human-note ${humanNotePath}${flowPart}`;
+    `npm.cmd run workflow -- --resume ${runFolderPath} --from ${resumeFrom} --human-note ${humanNotePath}${flowPart}${profilePart}`;
   const reason =
     input.role.role === "reviewer"
       ? "仕様または受け入れ条件に不足があるため、Designerに戻して設計をやり直す必要があります。"
@@ -708,6 +786,8 @@ async function readRunLog(runFolder: string): Promise<RunLog> {
   runLog.external_role ??= "pm";
   runLog.flow_id ??= "default-v0";
   runLog.flow_path ??= null;
+  runLog.profile_id ??= null;
+  runLog.profile_path ??= null;
   runLog.human_note_path ??= null;
 
   return runLog;
@@ -770,7 +850,13 @@ function prepareRunLogForResume(
 function getExecutorForRole(
   role: RoleDefinition,
   options: CliOptions,
+  profile: ExecutorProfile | null,
 ): ExecutorName {
+  const profileExecutor = profile?.assignments[role.role];
+  if (profileExecutor) {
+    return profileExecutor;
+  }
+
   if (role.executor) {
     return role.executor;
   }
@@ -783,6 +869,7 @@ function getExecutorForRole(
 async function main(): Promise<void> {
   const options = parseCliArgs(process.argv.slice(2));
   const flowDefinition = await readFlowDefinition(options.flowPath);
+  const profileDefinition = await readExecutorProfile(options.profilePath);
   const activeRoleSequence = flowDefinition.roles;
   const promptTemplate = await readPromptTemplate();
   let runFolder: string;
@@ -807,6 +894,8 @@ async function main(): Promise<void> {
       workflow_version: "v0",
       flow_id: flowDefinition.flowId,
       flow_path: flowDefinition.flowPath,
+      profile_id: profileDefinition.profileId,
+      profile_path: profileDefinition.profilePath,
       human_note_path: humanNote?.path ?? null,
       input_path: toWorkspacePath(input.inputPath),
       run_folder: toWorkspacePath(runFolder),
@@ -830,6 +919,8 @@ async function main(): Promise<void> {
     runLog = await readRunLog(runFolder);
     runLog.flow_id = flowDefinition.flowId;
     runLog.flow_path = flowDefinition.flowPath;
+    runLog.profile_id = profileDefinition.profileId;
+    runLog.profile_path = profileDefinition.profilePath;
     humanNote = await readHumanNote(options.humanNotePath);
     runLog.human_note_path = humanNote?.path ?? null;
     runLog.executor = options.executor;
@@ -857,10 +948,15 @@ async function main(): Promise<void> {
       const promptPath = path.join(runFolder, `${role.stem}.prompt.md`);
       const outputPath = path.join(runFolder, `${role.stem}.output.md`);
       const roleStartedAt = Date.now();
+      const executorForRole = getExecutorForRole(
+        role,
+        options,
+        profileDefinition.profile,
+      );
       const roleRecord: RunRoleRecord = {
         step: role.step,
         role: role.role,
-        executor: getExecutorForRole(role, options),
+        executor: executorForRole,
         status: "running",
         prompt_path: null,
         output_path: null,
@@ -890,6 +986,7 @@ async function main(): Promise<void> {
           runFolder,
           role,
           flowPath: flowDefinition.flowPath,
+          profilePath: profileDefinition.profilePath,
           humanNote,
           sourceContext,
         }),
@@ -898,7 +995,6 @@ async function main(): Promise<void> {
       await writeFile(promptPath, prompt, "utf8");
       roleRecord.prompt_path = toWorkspacePath(promptPath);
 
-      const executorForRole = getExecutorForRole(role, options);
       const rawOutput = await executeRole({
         roleName: role.displayName,
         prompt,
@@ -922,6 +1018,7 @@ async function main(): Promise<void> {
             role,
             runFolder,
             flowPath: flowDefinition.flowPath,
+            profilePath: profileDefinition.profilePath,
           }),
         ].join("\n");
       }

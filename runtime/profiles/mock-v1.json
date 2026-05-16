@@ -1,0 +1,28 @@
+{
+  "profile_id": "mock-v1",
+  "description": "All roles use the mock executor for local regression and offline verification.",
+  "assignments": {
+    "pm": "mock",
+    "designer": "mock",
+    "reviewer": "mock",
+    "pm-decision": "mock",
+    "integrator-s": "mock",
+    "worker": "mock",
+    "debugger": "mock",
+    "integrator-c": "mock",
+    "pm-final-decision": "mock",
+    "infra": "mock"
+  },
+  "role_intent": {
+    "pm": "Mock PM output",
+    "designer": "Mock Designer output",
+    "reviewer": "Mock Reviewer output",
+    "pm-decision": "Mock PM-Decision output",
+    "integrator-s": "Mock Integrator-S output",
+    "worker": "Mock Worker output",
+    "debugger": "Mock Debugger output",
+    "integrator-c": "Mock Integrator-C output",
+    "pm-final-decision": "Mock PM-FinalDecision output",
+    "infra": "Mock Infra output"
+  }
+}

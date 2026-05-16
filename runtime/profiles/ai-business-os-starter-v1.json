@@ -1,0 +1,33 @@
+{
+  "profile_id": "ai-business-os-starter-v1",
+  "description": "Default distributed AI lineup based on role characteristics. GPT-family instruction roles are currently executed through the codex executor.",
+  "assignments": {
+    "pm": "codex",
+    "designer": "gemini",
+    "reviewer": "claude",
+    "pm-decision": "codex",
+    "integrator-s": "codex",
+    "worker": "codex",
+    "debugger": "claude",
+    "integrator-c": "codex",
+    "pm-final-decision": "codex",
+    "infra": "codex"
+  },
+  "role_intent": {
+    "pm": "GPT-family instruction and scope control",
+    "designer": "Gemini creative/spec expansion",
+    "reviewer": "Claude verification and risk review",
+    "pm-decision": "GPT-family decision synthesis",
+    "integrator-s": "GPT-family instruction packet integration",
+    "worker": "Codex faithful implementation, Copilot substitute",
+    "debugger": "Claude verification and bug isolation",
+    "integrator-c": "GPT-family completion integration",
+    "pm-final-decision": "GPT-family final decision",
+    "infra": "GPT-family operational/infrastructure control"
+  },
+  "fallbacks": {
+    "codex": "claude",
+    "claude": "codex",
+    "gemini": "claude"
+  }
+}

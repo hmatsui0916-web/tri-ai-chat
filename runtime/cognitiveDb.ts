@@ -558,14 +558,17 @@ export async function listWorkingSnapshots(): Promise<Array<BranchSnapshot | Wor
 export async function readWorkingSnapshot(
   snapshotId: string,
 ): Promise<{ record: BranchSnapshot | WorkingSnapshotRecord; body: string | null }> {
-  const status = await cognitiveDbStatus();
+  const paths = cognitiveDbPaths();
+  const working = await readJson<WorkingDb>(paths.workingDb);
   const normalizedSnapshotId = snapshotId.toUpperCase();
-  const record = status.working.snapshots.find(
+  const record = working.snapshots.find(
     (snapshot) => snapshot.snapshot_id.toUpperCase() === normalizedSnapshotId,
   );
 
   if (!record) {
-    throw new Error(`Working snapshot "${snapshotId}" was not found.`);
+    throw new Error(
+      `Working snapshot "${snapshotId}" was not found. Run list-snapshots to find an existing WSNAP-* or imported SNAP-* id.`,
+    );
   }
 
   if (!("body_path" in record)) {
@@ -574,6 +577,102 @@ export async function readWorkingSnapshot(
 
   const body = await readFile(path.resolve(workspaceRoot, record.body_path), "utf8");
   return { record, body };
+}
+
+export async function buildReversibilityCheckPacket(
+  snapshotId: string,
+): Promise<string> {
+  const { record, body } = await readWorkingSnapshot(snapshotId);
+  const title = "title" in record ? record.title : record.snapshot_title;
+  const status = record.record_status ?? record.status;
+  const sourcePath = "source_path" in record ? record.source_path : null;
+  const coreMeaning = body
+    ? extractMarkdownSection(body, "Core Meaning") || ("core_meaning" in record ? record.core_meaning : "")
+    : "core_meaning" in record ? record.core_meaning : "";
+  const whyPreserve = body
+    ? extractMarkdownSection(body, "Why Preserve") || ("why_preserve" in record ? record.why_preserve : "")
+    : "why_preserve" in record ? record.why_preserve : "";
+  const branchItems = body
+    ? extractMarkdownListSection(body, "Branch Items")
+    : "branch_items" in record
+      ? record.branch_items.map((item) => `${item.branch_id}: ${item.core_meaning}`)
+      : [];
+  const phase3Questions = body
+    ? extractMarkdownListSection(body, "Potential Phase3 Questions", { includeNumbered: true })
+    : "potential_phase3_questions" in record
+      ? record.potential_phase3_questions
+      : [];
+  const returnQuery = record.return_query || (body ? extractMarkdownSection(body, "Return Query") : "");
+  const rawMaterial = body ? extractMarkdownSection(body, "Raw Material") : "";
+
+  const phase2Ready = coreMeaning.trim().length > 0 && branchItems.length > 0;
+  const phase3Ready = phase3Questions.length > 0 || branchItems.length > 1;
+  const undecidedItems = [
+    ...phase3Questions,
+    ...branchItems
+      .filter((item) => /未決|問い|question|open|検討|候補|threshold|閾値/i.test(item))
+      .slice(0, 3),
+  ];
+  const divergenceBranches = branchItems.length > 0
+    ? branchItems.slice(0, 5)
+    : returnQuery
+      ? [returnQuery]
+      : ["Reopen the preserved raw material and identify the next branch."];
+  const rawWarning = rawMaterial.trim().length > 0
+    ? "Raw material is preserved in the snapshot body."
+    : "Raw material is not available in the local snapshot body; avoid overclaiming context.";
+
+  const lines = [
+    `# Reversibility Check: ${record.snapshot_id}`,
+    "",
+    "## Snapshot Metadata",
+    "",
+    `- Snapshot: ${record.snapshot_id}`,
+    `- Title: ${title}`,
+    `- Status: ${status}`,
+    `- Source: ${sourcePath ?? "not recorded"}`,
+    `- Return Query: ${formatHumanFacingLine(returnQuery, "not recorded")}`,
+    "",
+    "## Phase2 / Phase3 Suitability Check",
+    "",
+    `- Phase2 compression material signal: ${phase2Ready ? "YES" : "REVIEW"}`,
+    `- Phase3 HumanDecision material signal: ${phase3Ready ? "YES" : "REVIEW"}`,
+    "- Note: this is a heuristic evidence check, not adoption, PM judgment, or Human final decision.",
+    `- Core Meaning present: ${coreMeaning.trim() ? "YES" : "NO"}`,
+    `- Branch Items present: ${branchItems.length > 0 ? `YES (${branchItems.length})` : "NO"}`,
+    `- Potential Phase3 Questions present: ${phase3Questions.length > 0 ? `YES (${phase3Questions.length})` : "NO"}`,
+    `- Raw material: ${rawWarning}`,
+    "",
+    "## Human-Facing Reversibility Context",
+    "",
+    "このSnapshotだけを読んだ別セッションが復元すべき文脈:",
+    "",
+    "- 何について考えていたか:",
+    `  ${formatHumanFacingLine(coreMeaning, "This snapshot preserves a branch that needs to be reopened before any adoption decision.")}`,
+    "",
+    "- なぜこの枝を保存する価値があるか:",
+    `  ${formatHumanFacingLine(whyPreserve, "It may be useful for later divergence, comparison, PM review, or Phase2/3 extraction.")}`,
+    "",
+    "- どの方向に発散を再開できるか:",
+    ...divergenceBranches.map((item) => `  - ${formatHumanFacingLine(item, "Reopen this branch.")}`),
+    "",
+    "- まだ決めていないこと:",
+    ...(undecidedItems.length > 0
+      ? undecidedItems.slice(0, 5).map((item) => `  - ${formatHumanFacingLine(item, "Undecided item.")}`)
+      : ["  - No explicit undecided item was extracted. Human should confirm before Phase3."]),
+    "",
+    "- 誤って決定扱いしてはいけないこと:",
+    "  - This snapshot is not adoption, PM judgment, rule/spec change, implementation instruction, or Human final decision.",
+    "  - AI-generated interpretation in this check is only a reversibility aid.",
+    "",
+    "## Human Check",
+    "",
+    "この再生成コンテキストに違和感がなければ、Snapshot案は保存/ready判断へ進める。",
+    "違和感がある場合は、ズレている点を指摘してSnapshot案を修正する。",
+    "",
+  ];
+
+  return `${lines.join("\n")}\n`;
 }
 
 export async function updateWorkingSnapshotStatus(
@@ -2334,6 +2433,83 @@ function truncateForLine(value: string, maxLength: number): string {
     return value;
   }
   return `${value.slice(0, maxLength - 3)}...`;
+}
+
+function extractMarkdownSection(content: string, heading: string): string {
+  const headingPattern = new RegExp(`^##\\s+${escapeRegExp(heading)}\\s*$`, "i");
+  const lines = content.split(/\r?\n/);
+  const startIndex = lines.findIndex((line) => headingPattern.test(line.trim()));
+
+  if (startIndex < 0) {
+    return "";
+  }
+
+  const sectionLines: string[] = [];
+  for (let index = startIndex + 1; index < lines.length; index += 1) {
+    if (/^##\s+/.test(lines[index].trim())) {
+      break;
+    }
+    sectionLines.push(lines[index]);
+  }
+
+  return cleanMarkdownSection(sectionLines.join("\n"));
+}
+
+function extractMarkdownListSection(
+  content: string,
+  heading: string,
+  options: { includeNumbered?: boolean } = {},
+): string[] {
+  const section = extractMarkdownSection(content, heading);
+  const bulletItems = section
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) =>
+      line.startsWith("- ") ||
+      line.startsWith("* ") ||
+      (options.includeNumbered && /^\d+\.\s+/.test(line))
+    )
+    .map((line) => line.replace(/^[-*]\s+/, "").replace(/^\d+\.\s+/, "").trim())
+    .filter(Boolean);
+
+  if (bulletItems.length > 0) {
+    return bulletItems;
+  }
+
+  return extractMarkdownTableBranchItems(section);
+}
+
+function cleanMarkdownSection(value: string): string {
+  return value
+    .split(/\r?\n/)
+    .filter((line) => !line.trim().startsWith("```"))
+    .join("\n")
+    .trim();
+}
+
+function extractMarkdownTableBranchItems(section: string): string[] {
+  return section
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /^\|\s*BR-\d+/i.test(line))
+    .map((line) => {
+      const cells = line.split("|").slice(1, -1).map((cell) => cell.trim());
+      const [branchId, label, coreMeaning] = cells;
+      return [branchId, label, coreMeaning].filter(Boolean).join(": ");
+    })
+    .filter(Boolean);
+}
+
+function formatHumanFacingLine(value: string, fallback: string): string {
+  const cleaned = value
+    .replace(/^BR-\d+:\s*/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return truncateForLine(cleaned || fallback, 260);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 async function ensureInitialized(): Promise<void> {
